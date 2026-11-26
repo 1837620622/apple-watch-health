@@ -57,7 +57,7 @@ jobs:
       - name: Package clean Skill ZIP
         run: |
           mkdir -p dist/apple-watch-health
-          cp -r SKILL.md README.md LICENSE pyproject.toml uv.lock awh.sh awh.cmd sandboxes references src dist/apple-watch-health/
+          cp -r SKILL.md README.md LICENSE pyproject.toml uv.lock awh.sh awh.cmd references src dist/apple-watch-health/
           find dist/apple-watch-health -name '__pycache__' -exec rm -rf {} +
           (cd dist && zip -rq apple-watch-health-skill.zip apple-watch-health)
           ls -lh dist/apple-watch-health-skill.zip

@@ -19,7 +19,7 @@ def project_root() -> Path:
 
 def sandbox_profile_path() -> Path:
     """Return path to macOS Seatbelt profile blocking IP network access."""
-    return project_root() / "sandboxes" / "local-only.sb"
+    return Path(__file__).resolve().parent / "local-only.sb"
 
 
 def data_dir() -> Path:

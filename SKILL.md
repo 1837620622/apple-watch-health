@@ -25,7 +25,7 @@ metadata:
 
 1. **三层状态绝不混淆**：`authentication_succeeded`（认证通过）≠ `location_link_acknowledged`（报文送达）≠ 地图蓝点移动 ≠ 健康 App 显示可设置。必须逐层核实。
 2. **先查功能矩阵，再决定是否改定位**：截至 2026-11，**睡眠呼吸暂停提示（2026-10-14 上线）、心电图 ECG、心律不齐、房颤历史、血氧、生命体征、准备指数**在中国大陆已官方原生开放，无需改定位；仅**高血压通知**等仍处大陆审批中的功能需要临时地区坐标。详见 [feature-matrix.md](references/feature-matrix.md)。
-3. **只改必要项，不动无关设置**：不修改 Apple ID 地区、系统时间、描述文件或开发者模式；macOS 上 `probe`/`send` 自动运行在 Seatbelt 断网沙箱 (`sandboxes/local-only.sb`) 内。
+3. **只改必要项，不动无关设置**：不修改 Apple ID 地区、系统时间、描述文件或开发者模式；macOS 上 `probe`/`send` 自动运行在 Seatbelt 断网沙箱 (`src/apple_watch_health/local-only.sb`) 内。
 4. **用完必须收尾**：开通或中止后，必须执行 `stop` 停掉发送器、引导用户拔线恢复真实定位、复查健康 App 开关状态，并按需运行 `clean --all` 清理临时缓存。
 
 ---

@@ -28,7 +28,7 @@
    - 该共享实验身份来自公开车载固件研究，并非 Apple 为个人签发的凭证，亦不按 GPL 重新授权，Apple 可能随时吊销。也支持通过 `--cert` / `--key` 使用你自有合法配件证书。
 2. **纯本地运行与网络隔离**：
    - 仅 `awh setup` 在提取远端发布包时联网（默认仅拉取 ~68 KB 的 ZIP 分片并强制 HTTPS + 双文件 SHA-256 校验，从不安装或运行 APK）。
-   - `awh probe` 与 `awh send` 全程纯本地 USB 通信，无遥测、无云端接口、无数据上传；在 macOS 上默认自动在 `/usr/bin/sandbox-exec -f sandboxes/local-only.sb` 沙箱内运行，从内核层禁止所有远端/本地 IP 网络连接。
+   - `awh probe` 与 `awh send` 全程纯本地 USB 通信，无遥测、无云端接口、无数据上传；在 macOS 上默认自动在 `/usr/bin/sandbox-exec` 断网沙箱内运行，从内核层禁止所有远端/本地 IP 网络连接。
 3. **隐私保护与环境清理**：
    - `awh doctor` / `awh devices` 默认脱敏 UDID；`awh monitor` 仅过滤并脱敏展示地区/NMEA 筛查关键词，不保存完整 syslog 或个人健康数据。
    - 使用结束后，随时可执行 `./awh.sh clean --all`（Windows 为 `awh.cmd clean --all`）彻底删除本地缓存的 MFi 身份、临时文件与虚拟环境。
