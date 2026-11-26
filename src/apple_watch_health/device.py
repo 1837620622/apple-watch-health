@@ -7,6 +7,7 @@ import inspect
 import os
 import re
 import socket
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -253,10 +254,28 @@ def check_windows_usbmux_ready() -> tuple[bool, str]:
         with socket.create_connection(("127.0.0.1", 27015), timeout=1.5):
             return True, "Apple Mobile Device Service (127.0.0.1:27015) 运行中"
     except OSError:
+        # Distinguish "not installed" vs "service stopped" to give exact beginner remediation.
+        try:
+            proc = subprocess.run(
+                ["sc", "query", "Apple Mobile Device Service"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            out = (proc.stdout or "") + (proc.stderr or "")
+            if "STOPPED" in out.upper():
+                return (
+                    False,
+                    "Apple Mobile Device Service 已安装但未启动！请用管理员 CMD 执行："
+                    'net start "Apple Mobile Device Service"',
+                )
+        except OSError:
+            pass
         return (
             False,
-            "未检测到 Apple USB 驱动服务 (127.0.0.1:27015)。请安装 Microsoft Store 版「Apple 设备」："
-            "winget install --id 9NP83LWLPZ9K",
+            "未检测到 Apple USB 驱动服务 (127.0.0.1:27015)。请先安装微软商店版「Apple 设备」并重启："
+            "winget install --id 9NP83LWLPZ9K（不要与旧版 iTunes 同时安装）",
         )
 
 

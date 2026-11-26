@@ -81,7 +81,12 @@ cd apple-watch-health
 ./awh.sh send --preset hk
 ```
 
-#### Windows (CMD / PowerShell)
+#### Windows (CMD / PowerShell) — 避坑必看
+> **为什么很多 Windows 用户说弄不了？90% 都卡在 Apple USB 驱动没装好或被抢占！按下面 3 条检查包通：**
+> 1. **必须装 Apple USB 驱动**：管理员终端执行 `winget install --id 9NP83LWLPZ9K`（微软商店版「Apple 设备」，装完建议重启一次；**不要和官网 exe 版旧 iTunes 同时装**，会冲突）。
+> 2. **插主板后置 USB 口**：优先插台式机背后主板 USB 口或笔记本原生口，避开供电不足的前置口/廉价扩展坞；插线后打开「Apple 设备」确认已点「信任」识别成功，然后**把「Apple 设备」窗口关掉**（避免抢占 USB 通道）。
+> 3. **中文终端防乱码已内置**：直接运行 `awh.cmd`（会自动免配置装好 `uv` 和 UTF-8 环境），先跑 `awh.cmd doctor` 看到 `[OK] USB 服务: Apple Mobile Device Service (127.0.0.1:27015) 运行中` 且读出你的 iPhone + Watch 型号即可继续！
+
 ```cmd
 git clone https://github.com/1837620622/apple-watch-health.git
 cd apple-watch-health

@@ -399,7 +399,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_stdio_utf8() -> None:
+    """Force UTF-8 stdout/stderr on Windows (prevents cp1252/gbk UnicodeEncodeError)."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio_utf8()
     raw = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     args = parser.parse_args(raw)

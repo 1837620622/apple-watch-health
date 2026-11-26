@@ -34,6 +34,19 @@ jobs:
           uv run awh --version
           uv run awh presets
           uv run awh features
+      - name: Smoke test Windows launcher (awh.cmd)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          awh.cmd --version
+          awh.cmd presets
+          awh.cmd features
+      - name: Smoke test macOS launcher (awh.sh)
+        if: runner.os == 'macOS'
+        run: |
+          ./awh.sh --version
+          ./awh.sh presets
+          ./awh.sh features
 
   package-skill:
     name: Build Skill ZIP
