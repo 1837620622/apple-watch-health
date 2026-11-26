@@ -9,10 +9,10 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-2563eb.svg?style=flat-square)](#)
 [![Zero Cost](https://img.shields.io/badge/cost-100%25%20Free%20%26%20Open%20Source-16a34a.svg?style=flat-square)](references/legal-and-security.md)
 
-通过本地 USB 模拟外置 MFi GPS 配件（iAP2 / NMEA），把 iPhone 临时定位到香港等支持地区，<br>
-帮中国大陆或未开放地区的 Apple Watch 开启地区受限健康功能，开完恢复真实定位并一键清场。
+通过本地 USB 模拟外置 MFi GPS 配件（iAP2 / NMEA），**无副作用**将 iPhone 临时定位到地球上任意地点并随时一键恢复；<br>
+同时支持自动探测 Apple Watch 型号与 watchOS 版本，协助开启地区受限健康功能，用完一键清场。
 
-[3 分钟上手](#快速开始) · [手机端必做步骤](#手机端操作缺一不可) · [Windows 避坑](#windows-避坑) · [功能清单](#2026-11-大陆功能现状) · [免责声明](#法律与免责声明)
+[3 分钟上手](#快速开始) · [任意地点定位与恢复](#任意地点定位与恢复零副作用) · [手机端必做步骤](#手机端操作缺一不可) · [Windows 避坑](#windows-避坑) · [免责声明](#法律与免责声明)
 
 </div>
 
@@ -83,6 +83,25 @@ cd apple-watch-health
 
 ---
 
+## 任意地点定位与恢复（零副作用）
+
+本工具的核心能力是**硬件级本地 USB 虚拟定位**（macOS & Windows 通用），不改系统时间、不改 Apple ID、不装描述文件、不越狱，**停推拔线即恢复，零残留副作用**：
+
+```bash
+# 定位到地球上任意地点（内置 30+ 全球热门城市离线秒开，任意地标自动解析坐标）
+./awh.sh locate --place "香港中环"
+./awh.sh locate --place "东京"
+./awh.sh locate --place "Apple Park"
+./awh.sh locate --lat 51.5074 --lon -0.1278 --duration 600   # 或直接写经纬度（Windows 用 awh.cmd）
+
+# 一键停止并恢复真实定位（无任何系统副作用）
+./awh.sh restore
+```
+
+> 给 AI 助手直接说人话就行，例如：「用 apple-watch-health 把我手机定位到东京涩谷，10 分钟后帮我恢复真实定位」。
+
+---
+
 ## 手机端操作（缺一不可）
 
 很多人只推了坐标却没成功，问题都出在下面 4 步没做全。保持 **USB 线插着** 且 `send --preset hk` 运行中：
@@ -148,7 +167,8 @@ Windows 端代码已通过 GitHub Actions `windows-latest` 完整单测与 `awh.
 | `presets` | 查看内置坐标预设（`hk`, `hk-tst`, `mo`, `us-sf`, `us-ny`, `jp`, `sg`, `tw`） |
 | `setup` | 极速提取本地 MFi 身份（支持 `--full-apk`、`--apk`、`--cert/--key`、`--force`） |
 | `probe` | 仅做 USB iAP2 识别与 MFi-v3 握手测试，不发坐标 |
-| `send` | 推送坐标（支持 `--preset`、`--lat/--lon`、`--udid`、`--duration`、`--no-sandbox`） |
+| `send` / `locate` | 推送坐标到任意地点（`--place "地名"`、`--preset`、`--lat/--lon`、`--udid`、`--duration`） |
+| `restore` | 停止推送并无副作用恢复 iPhone 真实定位 |
 | `monitor` | 实时查看脱敏后的 iPhone 定位筛查（`GPRMC`）与健康地区状态日志 |
 | `stop` | 停止后台发送进程并释放 PID 锁 |
 | `clean` | 清理缓存与残留；加 `--all` 彻底删除身份文件与 `.venv` |

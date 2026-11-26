@@ -1,6 +1,6 @@
 [project]
 name = "apple-watch-health"
-version = "2.0.0"
+version = "2.1.0"
 description = "Cross-platform (macOS & Windows) local USB iAP2 accessory-location toolkit & AI Agent Skill for Apple Watch regional health feature testing and diagnostics"
 readme = "README.md"
 license = "GPL-3.0-only"

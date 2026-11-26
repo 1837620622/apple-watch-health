@@ -6,7 +6,7 @@ import pytest
 
 from apple_watch_health.cli import build_parser, main
 from apple_watch_health.device import classify_watch_model, friendly_model, sanitize_log_message
-from apple_watch_health.profile import PRESETS
+from apple_watch_health.profile import PRESETS, resolve_place
 from apple_watch_health.runner import RunConfig, run_session
 
 
@@ -26,6 +26,29 @@ def test_cli_validation_rejects_invalid_duration_and_partial_coords() -> None:
     parser = build_parser()
     ns = parser.parse_args(["send", "--preset", "hk"])
     assert ns.preset in PRESETS
+
+    loc_ns = parser.parse_args(["locate", "--place", "东京"])
+    assert loc_ns.place == "东京"
+
+
+def test_resolve_place_and_restore(capsys, tmp_path, monkeypatch) -> None:
+    lat, lon, _alt, label = resolve_place("东京", allow_online=False)
+    assert round(lat, 2) == 35.66 and round(lon, 2) == 139.70
+    assert "东京" in label
+
+    lat2, lon2, _alt2, _ = resolve_place("22.2819, 114.1589", allow_online=False)
+    assert lat2 == pytest.approx(22.2819) and lon2 == pytest.approx(114.1589)
+
+    lat3, lon3, _alt3, _ = resolve_place("us-sf", allow_online=False)
+    assert lat3 == pytest.approx(37.7749) and lon3 == pytest.approx(-122.4194)
+
+    with pytest.raises(ValueError):
+        resolve_place("99.0, 200.0", allow_online=False)
+
+    monkeypatch.setenv("AWH_DATA_DIR", str(tmp_path))
+    assert main(["restore"]) == 0
+    out = capsys.readouterr().out
+    assert "零系统副作用" in out
 
 
 def test_model_mapping_and_log_sanitization() -> None:

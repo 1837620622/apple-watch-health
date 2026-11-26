@@ -34,7 +34,7 @@ from .paths import (
     project_root,
     resolve_identity_files,
 )
-from .profile import PRESETS, format_nmea_coordinate
+from .profile import PRESETS, format_nmea_coordinate, resolve_place
 from .runner import (
     RunConfig,
     emit,
@@ -186,6 +186,8 @@ def _cmd_presets(_args: argparse.Namespace) -> int:
 
 
 def _resolve_coords(args: argparse.Namespace) -> tuple[float, float, float, str]:
+    if getattr(args, "place", None):
+        return resolve_place(args.place)
     if args.lat is not None or args.lon is not None:
         if args.lat is None or args.lon is None:
             raise ValueError("自定义坐标必须同时提供 --lat 和 --lon")
@@ -215,21 +217,50 @@ def _cmd_probe_or_send(args: argparse.Namespace, raw_argv: list[str]) -> int:
     lat: float | None = None
     lon: float | None = None
     alt = 15.0
-    if args.command == "send":
+    effective_argv = list(raw_argv)
+    is_send_cmd = args.command in ("send", "locate")
+    if is_send_cmd:
         if not math.isfinite(args.interval) or args.interval < 1.0:
             print("错误: --interval 不能小于 1 秒", file=sys.stderr)
             return 2
         try:
-            lat, lon, alt, _label = _resolve_coords(args)
+            lat, lon, alt, label = _resolve_coords(args)
         except ValueError as err:
             print(f"错误: {err}", file=sys.stderr)
             return 2
+        # Resolve --place BEFORE entering macOS Seatbelt sandbox (which blocks IP networking).
+        if getattr(args, "place", None):
+            rebuilt = [
+                "send",
+                "--lat",
+                f"{lat:.6f}",
+                "--lon",
+                f"{lon:.6f}",
+                "--altitude",
+                f"{alt:.1f}",
+                "--duration",
+                str(args.duration),
+                "--interval",
+                str(args.interval),
+            ]
+            if args.udid:
+                rebuilt += ["--udid", args.udid]
+            if args.cert:
+                rebuilt += ["--cert", args.cert]
+            if args.key:
+                rebuilt += ["--key", args.key]
+            if args.auth_helper:
+                rebuilt += ["--auth-helper", args.auth_helper]
+            if args.no_sandbox:
+                rebuilt.append("--no-sandbox")
+            effective_argv = rebuilt
+            emit(event="place_resolved", query=args.place, label=label, latitude=lat, longitude=lon)
 
     # On macOS, re-exec strictly the Python process inside Seatbelt (IP network blocked).
-    maybe_reexec_in_macos_sandbox(raw_argv, enabled=not args.no_sandbox)
+    maybe_reexec_in_macos_sandbox(effective_argv, enabled=not args.no_sandbox)
 
     config = RunConfig(
-        command=args.command,
+        command="send" if is_send_cmd else "probe",
         cert_file=pair[0],
         key_file=pair[1],
         duration=args.duration,
@@ -279,6 +310,18 @@ def _cmd_stop(_args: argparse.Namespace) -> int:
     stopped, msg = stop_active_sender()
     print(msg)
     return 0 if stopped else 1
+
+
+def _cmd_restore(_args: argparse.Namespace) -> int:
+    """Stop any active location sender and guide zero-side-effect real-location restoration."""
+    stopped, msg = stop_active_sender()
+    print(f"[{'OK' if stopped else 'INFO'}] {msg}")
+    print("[OK] 已确认无残留后台定位进程（本工具不改系统时间/Apple ID/描述文件，零系统副作用）。")
+    print("请在 iPhone 上完成最后 3 步恢复真实定位：")
+    print("  1. 关闭飞行模式（恢复 Wi-Fi / 蜂窝网络）并拔掉 USB 数据线；")
+    print("  2. 打开 Apple 地图点定位箭头刷新（若仍缓存旧位置，关「定位服务」等 10 秒再开）；")
+    print("  3. 若刚开通了健康功能，再进「健康」App 复核开关仍为开启状态。")
+    return 0
 
 
 def _cmd_clean(args: argparse.Namespace) -> int:
@@ -366,7 +409,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, default_dur, help_text in (
         ("probe", 20.0, "仅执行 USB iAP2 识别与 MFi-v3 握手测试，不发送坐标"),
-        ("send", 1200.0, "启动有时限的 USB iAP2 坐标推送会话（默认香港中环，macOS 默认沙箱断网）"),
+        ("send", 1200.0, "启动有时限的 USB iAP2 坐标推送（支持任意地名 --place、预设 --preset 或 --lat/--lon）"),
+        ("locate", 1200.0, "send 的快捷别名：把 iPhone 定位到任意地点（地名 / 预设 / 经纬度）"),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--udid", help="多设备连接时指定目标 iPhone UDID")
@@ -375,12 +419,16 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--key", help="临时指定私钥文件")
         p.add_argument("--auth-helper", help="自定义外部 JSONL 认证助手路径")
         p.add_argument("--no-sandbox", action="store_true", help="禁用 macOS sandbox-exec 断网沙箱")
-        if name == "send":
+        if name in ("send", "locate"):
+            p.add_argument(
+                "--place",
+                help="任意地点名称或经纬度（如 '香港中环'、'东京'、'Apple Park'、'35.6595,139.7004'）",
+            )
             p.add_argument(
                 "--preset",
                 choices=sorted(PRESETS),
                 default="hk",
-                help="地区坐标预设（默认 hk 香港中环）",
+                help="内置地区坐标预设（默认 hk 香港中环）",
             )
             p.add_argument("--lat", type=float, help="自定义纬度 (-90..90)")
             p.add_argument("--lon", type=float, help="自定义经度 (-180..180)")
@@ -392,6 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon.add_argument("--duration", type=float, default=120.0, help="监听时长秒数（默认 120）")
 
     sub.add_parser("stop", help="安全停止运行中的后台坐标发送会话")
+    sub.add_parser("restore", help="停止定位推送并引导无副作用恢复 iPhone 真实定位")
 
     p_clean = sub.add_parser("clean", help="清理旧版冗余缓存与临时文件（加 --all 彻底清空环境与身份）")
     p_clean.add_argument("--all", action="store_true", help="同时删除本地 MFi 身份缓存与 .venv 虚拟环境")
@@ -423,9 +472,10 @@ def main(argv: list[str] | None = None) -> int:
         "presets": _cmd_presets,
         "monitor": _cmd_monitor,
         "stop": _cmd_stop,
+        "restore": _cmd_restore,
         "clean": _cmd_clean,
     }
-    if args.command in ("probe", "send"):
+    if args.command in ("probe", "send", "locate"):
         return _cmd_probe_or_send(args, raw)
     return dispatch[args.command](args)
 
