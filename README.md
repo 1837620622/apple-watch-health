@@ -18,24 +18,27 @@
 
 ---
 
-## 工作原理
+## 双引擎工作原理（各司其职）
 
-为什么用 Xcode 或普通改定位工具把地图改到香港，**健康 App 还是提示「所在地区不可用」**？
+为什么很多改定位工具要么「健康 App 不认」，要么「开了 Wi-Fi 微信就不动」？因为 iOS 26/27 对不同场景走了两条完全不同的通道，本工具内置**双引擎**：
 
-Apple 在 iOS 26/27 里给位置打了来源标签：`isSimulatedBySoftware`（开发者模拟）会被健康服务直接拒收；而外置硬件 GPS（如 CarPlay 车机、蓝牙/USB MFi GPS）走的是 `isProducedByAccessory`，系统将其视为可信硬件定位。
+| 引擎 | 命令 | 适用场景 | 是否需要开发者模式 | 开 Wi-Fi / 5G 流量 |
+| --- | --- | --- | --- | --- |
+| **iAP2 外置 MFi 配件** | `send` | **开通 Apple Watch 高血压通知**（走 `isProducedByAccessory`，过健康地区校验） | **不需要** | 需开飞行模式 + 关 Wi-Fi/流量 |
+| **DVT 官方免 Root 隧道** | `locate`（默认） | **微信 / 苹果地图 / 高德等全部 App 全局改任意地点**（走官方 `LocationSimulation`） | 需要（免 sudo/Root） | **开着 Wi-Fi / 5G 照样秒生效** |
 
 ```text
   Mac / Windows (awh)                         iPhone (USB 信任)                 Apple Watch
   ────────────────────                        ─────────────────                 ───────────
-  1. pymobiledevice3 (async) ──USB──────────► lockdownd / companion_proxy ────► 自动读手表型号 & watchOS
-  2. MFi-v3 本地签名 (P-256) ◄─0xAA00/0xAA02─► com.apple.carkit.service (iAP2)
-  3. 注入香港 GPGGA / GPRMC  ──0xFFFB───────► locationd (离线国界 → HK) ──────► healthd 解锁开通入口
-     (macOS 走 Seatbelt 断网沙箱)              (开飞行模式 + 关 Wi-Fi/流量)       (开完停推恢复真实定位)
+  • [体检] companion_proxy ──USB────────────► lockdownd ──────────────────────► 自动读手表型号 & watchOS
+  • [健康] iAP2 + MFi-v3 ◄─0xAA00/0xFFFB────► com.apple.carkit.service ───────► healthd 解锁高血压通知
+  • [全局] UserspaceRsdTunnel (免 Root) ────► DVT LocationSimulation ─────────► 微信/地图/全部 App 秒改定位
+  • [恢复] awh restore ─────────────────────► 停 iAP2 + stopLocationSimulation ► 零副作用秒回真实 GPS
 ```
 
-- **实测验证环境**：**macOS** + **iPhone 16 Pro (`iOS 27.2.1`, 国行 CH/A)** + **Apple Watch Series 12 (`watchOS 27.2.1`, 国行 CH/B)** 已完整跑通，成功开通高血压通知，停推恢复真实定位后开关保持开启。
-- **不装开发环境也能用**：`awh.sh` / `awh.cmd` 会自动检测或安装独立版 `uv` 与隔离 Python 环境，不碰系统全局 Python；用完一条 `clean --all` 删干净。
-- **速度与安全**：身份文件通过 HTTP Range Remote-ZIP 只拉取 ~68 KB（实测约 **3.6 秒**，替代旧方案 31 MB 二十分钟龟速下载），双文件 SHA-256 校验，仓库内**零内置证书/私钥/APK**；macOS 运行 `probe`/`send` 时自动切入 Seatbelt 内核沙箱断绝全部 IP 联网。
+- **真机实测通过**：**macOS** + **iPhone 16 Pro (`iOS 27.2.1`, CH/A)** + **Apple Watch Series 12 (`watchOS 27.2.1`, CH/B)** 双引擎均已实测跑通——`iAP2` 成功开通高血压通知，`DVT` 免 Root 秒切纽约时代广场并一键恢复。
+- **零开发环境上手**：`awh.sh` / `awh.cmd` 自动准备独立版 `uv` 与隔离 Python 环境，不动系统全局 Python；用完 `clean --all` 删干净。
+- **快且克制**：MFi 身份通过 HTTP Range Remote-ZIP 只拉 ~68 KB（实测 **3.6 秒**），双文件 SHA-256 锁定，仓库**零内置密钥/APK**；macOS 上 `iAP2` 会话自动进 Seatbelt 断网沙箱。
 
 ---
 
@@ -83,22 +86,23 @@ cd apple-watch-health
 
 ---
 
-## 任意地点定位与恢复（零副作用）
+## 任意地点全局改定位与恢复（微信 / 地图全生效 · 零副作用）
 
-本工具的核心能力是**硬件级本地 USB 虚拟定位**（macOS & Windows 通用），不改系统时间、不改 Apple ID、不装描述文件、不越狱，**停推拔线即恢复，零残留副作用**：
+日常想把 **微信、苹果地图、高德等全部 App** 定位到世界任意角落（开着 Wi-Fi 和 5G 流量照样生效），先在 iPhone 打开一次 `设置 → 隐私与安全性 → 开发者模式`，然后一行命令秒改（免 `sudo` / 免管理员权限，macOS & Windows 通用）：
 
 ```bash
-# 定位到地球上任意地点（内置 30+ 全球热门城市离线秒开，任意地标自动解析坐标）
-./awh.sh locate --place "香港中环"
+# 秒切全球任意地点（内置 30+ 热门城市离线解析，任意地标自动解析，开着 Wi-Fi/5G 直接生效）
+./awh.sh locate --place "纽约"
 ./awh.sh locate --place "东京"
 ./awh.sh locate --place "Apple Park"
-./awh.sh locate --lat 51.5074 --lon -0.1278 --duration 600   # 或直接写经纬度（Windows 用 awh.cmd）
+./awh.sh locate --lat 51.5074 --lon -0.1278            # Windows 把 ./awh.sh 换成 awh.cmd
+./awh.sh locate --place "纽约" --hold 600              # 定时保持 600 秒后自动恢复
 
-# 一键停止并恢复真实定位（无任何系统副作用）
+# 一键恢复真实定位（停 iAP2 + 发官方 stopLocationSimulation 并等待手机确认，零系统副作用）
 ./awh.sh restore
 ```
 
-> 给 AI 助手直接说人话就行，例如：「用 apple-watch-health 把我手机定位到东京涩谷，10 分钟后帮我恢复真实定位」。
+> 给 AI 助手直接说人话就行，例如：「帮我把手机定位改到美国纽约」「用完了，帮我恢复真实定位」。
 
 ---
 

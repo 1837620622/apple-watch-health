@@ -10,7 +10,7 @@ description: >
   不适用于血压数值测量、医疗诊断或商业批量代开。
 license: GPL-3.0-only
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
   platforms: "macOS, Windows"
 ---
 
@@ -70,24 +70,24 @@ metadata:
    - **防误操作提示**：「移动脉率房颤提示软件（心律不齐）」与「移动脉率房颤迹象记录软件（房颤历史）」大陆均已官方开放且**严格互斥**，未确诊房颤用户保留心律不齐即可，切勿误开房颤历史。
    - 若健康仍提示不可用：尝试**先将 Apple Watch 关机（或关闭手表 Wi-Fi）**后重开健康 App，并可用 `./awh.sh monitor` 实时查看脱敏日志。
 
-### 场景 B：通用任意地点定位与无副作用恢复（macOS & Windows）
+### 场景 B：通用任意地点全局改定位与无副作用恢复（微信 / 地图 / 全部 App · macOS & Windows）
 
-如果用户只是想把 iPhone 临时定位到任意城市/地标/经纬度（不涉及健康开通），直接运行：
+如果用户想把 iPhone 全局定位到任意城市/地标/经纬度（**开着 Wi-Fi / 5G 流量，微信、苹果地图、高德等全部生效**），直接用默认 **官方免 Root DVT 引擎**（需 iPhone 开启「设置 → 隐私与安全性 → 开发者模式」）：
 ```bash
-# 按中英文地名（内置 30+ 热门城市秒级离线解析，其余地标自动在线解析后再进沙箱）
+# 2 秒生效，开着 Wi-Fi/5G 也能让微信/地图/全部 App 秒跳目标地点
+./awh.sh locate --place "纽约"
 ./awh.sh locate --place "东京"
 ./awh.sh locate --place "Apple Park"
-./awh.sh locate --place "35.6595,139.7004"
-
-# 或指定经纬度 / 预设（Windows 把 ./awh.sh 换成 awh.cmd）
-./awh.sh locate --lat 48.8566 --lon 2.3522 --duration 600
+./awh.sh locate --lat 48.8566 --lon 2.3522          # Windows 把 ./awh.sh 换成 awh.cmd
+./awh.sh locate --place "纽约" --hold 600            # 保持 600 秒后自动恢复
 ```
-- 手机端操作：保持 USB 连接，打开 Apple 地图点定位箭头（若原地不动，关闭「定位服务」10 秒再开即可生效）。
-- **无副作用恢复真实定位**（随时执行）：
+- **双引擎分工**：
+  - `send`（`--engine iap2`）：外置 MFi 硬件 GPS，**免开发者模式**，专门过 Apple 健康 `healthd` 地区校验（开通高血压通知必须用它）。
+  - `locate`（默认 `--engine dvt`）：Apple 官方免 Root Userspace 隧道 `LocationSimulation`，**支持开 Wi-Fi/5G 让微信、地图等全部 App 秒切全球任意坐标**。
+- **无副作用一键恢复真实定位**（随时执行，自动同时清理 iAP2 发送器 + 发送官方 `stopLocationSimulation` 并等待手机确认）：
 ```bash
 ./awh.sh restore
 ```
-会立即终止后台发送器、释放 PID 锁，不留任何系统配置改动；拔掉 USB 线（必要时开关一次定位服务 10 秒）即可恢复真实 GPS。
 
 ---
 

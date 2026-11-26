@@ -17,6 +17,7 @@ from .device import (
     platform_summary,
     stream_region_diagnostics,
 )
+from .dvt import dvt_clear_location, dvt_set_location, read_dvt_state
 from .identity_fetch import (
     NOTICE_URL,
     IdentityImportError,
@@ -312,15 +313,76 @@ def _cmd_stop(_args: argparse.Namespace) -> int:
     return 0 if stopped else 1
 
 
-def _cmd_restore(_args: argparse.Namespace) -> int:
-    """Stop any active location sender and guide zero-side-effect real-location restoration."""
+def _cmd_locate(args: argparse.Namespace, raw_argv: list[str]) -> int:
+    """Dual-engine global locator: `dvt` (all apps incl. WeChat/Maps w/ Wi-Fi) or `iap2` (Health)."""
+    if args.engine == "iap2":
+        return _cmd_probe_or_send(args, raw_argv)
+
+    try:
+        lat, lon, _alt, label = _resolve_coords(args)
+    except ValueError as err:
+        print(f"错误: {err}", file=sys.stderr)
+        return 2
+
+    if not math.isfinite(args.hold) or args.hold < 0 or args.hold > 3600:
+        print("错误: --hold 必须在 0..3600 秒之间", file=sys.stderr)
+        return 2
+
+    try:
+        state = asyncio.run(
+            dvt_set_location(
+                lat,
+                lon,
+                label=label,
+                serial=args.udid,
+                hold_seconds=args.hold,
+            )
+        )
+    except KeyboardInterrupt:
+        emit(event="interrupted")
+        return 0
+    except Exception as err:
+        emit(
+            event="error",
+            engine="dvt",
+            type=type(err).__name__,
+            detail=str(err),
+            hint="请确认 iPhone 已解锁、信任此电脑并开启「设置 → 隐私与安全性 → 开发者模式」；或改用 --engine iap2",
+        )
+        return 1
+
+    emit(
+        event="location_applied",
+        engine="dvt",
+        device=state.get("device"),
+        label=label,
+        latitude=lat,
+        longitude=lon,
+        cleared=bool(state.get("cleared", False)),
+    )
+    if not state.get("cleared"):
+        print(
+            f"[OK] 已通过官方 DVT 通道将 {state.get('device')} 全局定位至 {label} ({lat:.4f}, {lon:.4f})！\n"
+            "     微信 / 苹果地图 / 高德等全部 App 均已生效（无需关 Wi-Fi/流量）。\n"
+            "     用完执行 `awh restore` 即可无副作用秒恢复真实 GPS。"
+        )
+    return 0
+
+
+def _cmd_restore(args: argparse.Namespace) -> int:
+    """Stop any active iAP2 sender AND clear any DVT simulated location (zero side effects)."""
     stopped, msg = stop_active_sender()
-    print(f"[{'OK' if stopped else 'INFO'}] {msg}")
-    print("[OK] 已确认无残留后台定位进程（本工具不改系统时间/Apple ID/描述文件，零系统副作用）。")
-    print("请在 iPhone 上完成最后 3 步恢复真实定位：")
-    print("  1. 关闭飞行模式（恢复 Wi-Fi / 蜂窝网络）并拔掉 USB 数据线；")
-    print("  2. 打开 Apple 地图点定位箭头刷新（若仍缓存旧位置，关「定位服务」等 10 秒再开）；")
-    print("  3. 若刚开通了健康功能，再进「健康」App 复核开关仍为开启状态。")
+    print(f"[{'OK' if stopped else 'INFO'}] iAP2 发送器: {msg}")
+
+    dvt_prev = read_dvt_state()
+    if dvt_prev or args.force_dvt:
+        ok, dvt_msg = asyncio.run(dvt_clear_location(serial=args.udid))
+        print(f"[{'OK' if ok else 'WARN'}] DVT 官方定位: {dvt_msg}")
+    else:
+        print("[INFO] DVT 官方定位: 未检测到本工具记录的 DVT 模拟（如需强制清除请加 --force-dvt）")
+
+    print("[OK] 零系统副作用：不修改 Apple ID、系统时间、VPN 或描述文件。")
+    print("提示: 如曾为开通健康功能开启飞行模式，现在关闭飞行模式并打开地图即可确认恢复真实定位。")
     return 0
 
 
@@ -409,20 +471,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, default_dur, help_text in (
         ("probe", 20.0, "仅执行 USB iAP2 识别与 MFi-v3 握手测试，不发送坐标"),
-        ("send", 1200.0, "启动有时限的 USB iAP2 坐标推送（支持任意地名 --place、预设 --preset 或 --lat/--lon）"),
-        ("locate", 1200.0, "send 的快捷别名：把 iPhone 定位到任意地点（地名 / 预设 / 经纬度）"),
+        ("send", 1200.0, "启动 USB iAP2 坐标推送（专用于开通 Apple Watch 健康功能，免开发者模式）"),
+        ("locate", 1200.0, "将 iPhone 全局定位到任意地点（默认官方 DVT 引擎支持微信/地图全部 App；可切 --engine iap2）"),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--udid", help="多设备连接时指定目标 iPhone UDID")
-        p.add_argument("--duration", type=float, default=default_dur, help=f"会话时长秒数 (1..3600，默认 {int(default_dur)})")
-        p.add_argument("--cert", help="临时指定证书文件")
-        p.add_argument("--key", help="临时指定私钥文件")
-        p.add_argument("--auth-helper", help="自定义外部 JSONL 认证助手路径")
-        p.add_argument("--no-sandbox", action="store_true", help="禁用 macOS sandbox-exec 断网沙箱")
+        p.add_argument("--duration", type=float, default=default_dur, help=f"iAP2 会话时长秒数 (1..3600，默认 {int(default_dur)})")
+        p.add_argument("--cert", help="临时指定证书文件 (iap2)")
+        p.add_argument("--key", help="临时指定私钥文件 (iap2)")
+        p.add_argument("--auth-helper", help="自定义外部 JSONL 认证助手路径 (iap2)")
+        p.add_argument("--no-sandbox", action="store_true", help="禁用 macOS sandbox-exec 断网沙箱 (iap2)")
         if name in ("send", "locate"):
             p.add_argument(
                 "--place",
-                help="任意地点名称或经纬度（如 '香港中环'、'东京'、'Apple Park'、'35.6595,139.7004'）",
+                help="任意地点名称或经纬度（如 '纽约'、'香港中环'、'东京'、'Apple Park'、'40.758,-73.9855'）",
             )
             p.add_argument(
                 "--preset",
@@ -433,14 +495,29 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--lat", type=float, help="自定义纬度 (-90..90)")
             p.add_argument("--lon", type=float, help="自定义经度 (-180..180)")
             p.add_argument("--altitude", type=float, default=15.0, help="自定义海拔米数（默认 15.0）")
-            p.add_argument("--interval", type=float, default=1.0, help="最小发送间隔秒数（>=1，默认 1）")
+            p.add_argument("--interval", type=float, default=1.0, help="iAP2 最小发送间隔秒数（>=1，默认 1）")
+        if name == "locate":
+            p.add_argument(
+                "--engine",
+                choices=["dvt", "iap2"],
+                default="dvt",
+                help="定位引擎：dvt=官方免Root全局改定位(微信/地图/Wi-Fi全生效，默认)；iap2=外置MFi配件(开健康功能用)",
+            )
+            p.add_argument(
+                "--hold",
+                type=float,
+                default=0.0,
+                help="DVT 引擎持续保持秒数（默认 0=注入后立即返回并持久生效直至 awh restore；>0=到期自动恢复）",
+            )
 
     p_mon = sub.add_parser("monitor", help="实时监听脱敏后的 iPhone 定位筛查与健康地区判定日志")
     p_mon.add_argument("--udid", help="指定目标 iPhone UDID")
     p_mon.add_argument("--duration", type=float, default=120.0, help="监听时长秒数（默认 120）")
 
-    sub.add_parser("stop", help="安全停止运行中的后台坐标发送会话")
-    sub.add_parser("restore", help="停止定位推送并引导无副作用恢复 iPhone 真实定位")
+    sub.add_parser("stop", help="安全停止运行中的后台 iAP2 坐标发送会话")
+    p_res = sub.add_parser("restore", help="一键停止 iAP2 发送并清除 DVT 模拟定位，无副作用恢复真实 GPS")
+    p_res.add_argument("--udid", help="指定目标 iPhone UDID")
+    p_res.add_argument("--force-dvt", action="store_true", help="即使本地无记录也强制发送官方 DVT stopLocationSimulation")
 
     p_clean = sub.add_parser("clean", help="清理旧版冗余缓存与临时文件（加 --all 彻底清空环境与身份）")
     p_clean.add_argument("--all", action="store_true", help="同时删除本地 MFi 身份缓存与 .venv 虚拟环境")
@@ -475,8 +552,10 @@ def main(argv: list[str] | None = None) -> int:
         "restore": _cmd_restore,
         "clean": _cmd_clean,
     }
-    if args.command in ("probe", "send", "locate"):
+    if args.command in ("probe", "send"):
         return _cmd_probe_or_send(args, raw)
+    if args.command == "locate":
+        return _cmd_locate(args, raw)
     return dispatch[args.command](args)
 
 
