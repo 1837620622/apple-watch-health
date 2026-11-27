@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import math
 import shutil
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, aio
 from .catalog import render_feature_table
 from .device import (
     check_windows_usbmux_ready,
@@ -17,7 +16,16 @@ from .device import (
     platform_summary,
     stream_region_diagnostics,
 )
-from .dvt import dvt_clear_location, dvt_set_location, read_dvt_state
+from .dvt import (
+    DvtSetupError,
+    _hint_for,
+    active_dvt_holder,
+    dvt_clear_location,
+    dvt_hold_location,
+    read_dvt_state,
+    spawn_detached_holder,
+    wait_for_holder,
+)
 from .identity_fetch import (
     NOTICE_URL,
     IdentityImportError,
@@ -25,6 +33,7 @@ from .identity_fetch import (
     extract_identity_from_apk_bytes,
     fetch_identity_via_range,
     import_local_pair,
+    read_apk_file_bounded,
     write_identity_atomic,
 )
 from .mfi import ProviderError, inspect_identity_files
@@ -35,7 +44,7 @@ from .paths import (
     project_root,
     resolve_identity_files,
 )
-from .profile import PRESETS, format_nmea_coordinate, resolve_place
+from .profile import PRESETS, convert_to_wgs84, resolve_place
 from .runner import (
     RunConfig,
     emit,
@@ -68,11 +77,24 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     active = read_active_sender()
     if active:
-        print(f"[RUN] 检测到后台发送进程: PID={active['pid']} ({active.get('latitude')}, {active.get('longitude')})")
+        print(f"[RUN] 检测到后台 iAP2 发送进程: PID={active['pid']} ({active.get('latitude')}, {active.get('longitude')})")
     else:
-        print("[OK] 无残留后台发送进程")
+        print("[OK] 无残留后台 iAP2 发送进程")
+    holder = active_dvt_holder()
+    if holder:
+        print(
+            f"[RUN] DVT 定位保持中: PID={holder.get('pid')} {holder.get('label')} "
+            f"({holder.get('latitude')}, {holder.get('longitude')})，结束请运行 awh restore"
+        )
 
-    devices = asyncio.run(discover_usb_devices(include_network=False))
+    if not ok_mux:
+        print("[MISS] USB 服务不可用，跳过设备探测")
+        return 1 if args.strict else 0
+    try:
+        devices = aio.run(discover_usb_devices(include_network=False))
+    except Exception as err:
+        print(f"[FAIL] 设备枚举失败: {type(err).__name__}: {err}")
+        return 1
     if not devices:
         print("[MISS] 未检测到 USB 连接的 iPhone（请用数据线连接、解锁屏幕并点【信任】）")
         return 1 if args.strict else 0
@@ -96,6 +118,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                 f"      Watch: {watch.name} | {watch.model_name} ({watch.product_type}) | "
                 f"watchOS {watch.watchos_version} ({watch.build_version}) | 区域 {watch.region_info} | {w_compat}"
             )
+        if dev.developer_mode is not None:
+            dm = "已开启（可用 DVT locate）" if dev.developer_mode else "未开启 → `awh devmode --reveal` 后去设置里打开"
+            print(f"      开发者模式: {dm}")
         if not dev.watches and dev.watch_probe_note:
             print(f"      Watch: {dev.watch_probe_note}")
         if dev.error:
@@ -104,7 +129,14 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_devices(args: argparse.Namespace) -> int:
-    devices = asyncio.run(discover_usb_devices(include_network=args.all))
+    try:
+        devices = aio.run(discover_usb_devices(include_network=args.all))
+    except Exception as err:
+        ok_mux, mux_msg = check_windows_usbmux_ready()
+        print(f"设备枚举失败: {type(err).__name__}: {err}", file=sys.stderr)
+        if not ok_mux:
+            print(mux_msg, file=sys.stderr)
+        return 1
     if not devices:
         print("未检测到已连接的 iPhone。请检查 USB 数据线、屏幕解锁状态及【信任此电脑】提示。", file=sys.stderr)
         return 1
@@ -127,7 +159,7 @@ def _cmd_devices(args: argparse.Namespace) -> int:
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:
-    if not args.force and not args.cert and not args.apk:
+    if not (args.force or args.cert or args.key or args.apk or args.full_apk):
         existing = resolve_identity_files()
         if existing:
             try:
@@ -149,7 +181,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
         if args.apk:
             print(f"==> 从本地 APK 提取并校验完整 SHA-256: {args.apk}")
-            apk_bytes = Path(args.apk).expanduser().read_bytes()
+            apk_bytes = read_apk_file_bounded(Path(args.apk))
             identity = extract_identity_from_apk_bytes(apk_bytes)
         elif args.full_apk:
             print("==> 全量多线程下载 DiPlay v0.2.7 APK 并校验完整 SHA-256 (31.3 MB)...")
@@ -187,14 +219,19 @@ def _cmd_presets(_args: argparse.Namespace) -> int:
 
 
 def _resolve_coords(args: argparse.Namespace) -> tuple[float, float, float, str]:
+    coord_type = getattr(args, "coord_type", "wgs84") or "wgs84"
     if getattr(args, "place", None):
-        return resolve_place(args.place)
+        lat, lon, alt, label = resolve_place(args.place)
+        if coord_type != "wgs84":
+            lat, lon = convert_to_wgs84(lat, lon, coord_type)
+            label = f"{label} [{coord_type.upper()}→WGS84]"
+        return lat, lon, alt, label
     if args.lat is not None or args.lon is not None:
         if args.lat is None or args.lon is None:
             raise ValueError("自定义坐标必须同时提供 --lat 和 --lon")
-        format_nmea_coordinate(args.lat, is_latitude=True)
-        format_nmea_coordinate(args.lon, is_latitude=False)
-        return args.lat, args.lon, args.altitude, f"Custom ({args.lat:.4f}, {args.lon:.4f})"
+        lat, lon = convert_to_wgs84(args.lat, args.lon, coord_type)
+        suffix = f" [{coord_type.upper()}→WGS84]" if coord_type != "wgs84" else ""
+        return lat, lon, args.altitude, f"Custom ({lat:.4f}, {lon:.4f}){suffix}"
     preset = PRESETS[args.preset]
     return preset.latitude, preset.longitude, preset.altitude_m, preset.name
 
@@ -224,38 +261,37 @@ def _cmd_probe_or_send(args: argparse.Namespace, raw_argv: list[str]) -> int:
         if not math.isfinite(args.interval) or args.interval < 1.0:
             print("错误: --interval 不能小于 1 秒", file=sys.stderr)
             return 2
+        if not math.isfinite(args.altitude) or not -1000.0 <= args.altitude <= 50000.0:
+            print("错误: --altitude 必须在 -1000..50000 米之间", file=sys.stderr)
+            return 2
         try:
             lat, lon, alt, label = _resolve_coords(args)
         except ValueError as err:
             print(f"错误: {err}", file=sys.stderr)
             return 2
-        # Resolve --place BEFORE entering macOS Seatbelt sandbox (which blocks IP networking).
-        if getattr(args, "place", None):
+        # Resolve --place / --coord-type BEFORE entering macOS Seatbelt sandbox (no IP network).
+        if getattr(args, "place", None) or getattr(args, "coord_type", "wgs84") != "wgs84":
             rebuilt = [
                 "send",
-                "--lat",
-                f"{lat:.6f}",
-                "--lon",
-                f"{lon:.6f}",
-                "--altitude",
-                f"{alt:.1f}",
-                "--duration",
-                str(args.duration),
-                "--interval",
-                str(args.interval),
+                f"--lat={lat:.6f}",
+                f"--lon={lon:.6f}",
+                f"--altitude={alt:.1f}",
+                f"--duration={args.duration}",
+                f"--interval={args.interval}",
             ]
             if args.udid:
-                rebuilt += ["--udid", args.udid]
+                rebuilt.append(f"--udid={args.udid}")
             if args.cert:
-                rebuilt += ["--cert", args.cert]
+                rebuilt.append(f"--cert={args.cert}")
             if args.key:
-                rebuilt += ["--key", args.key]
+                rebuilt.append(f"--key={args.key}")
             if args.auth_helper:
-                rebuilt += ["--auth-helper", args.auth_helper]
+                rebuilt.append(f"--auth-helper={args.auth_helper}")
             if args.no_sandbox:
                 rebuilt.append("--no-sandbox")
             effective_argv = rebuilt
-            emit(event="place_resolved", query=args.place, label=label, latitude=lat, longitude=lon)
+            if getattr(args, "place", None):
+                emit(event="place_resolved", query=args.place, label=label, latitude=lat, longitude=lon)
 
     # On macOS, re-exec strictly the Python process inside Seatbelt (IP network blocked).
     maybe_reexec_in_macos_sandbox(effective_argv, enabled=not args.no_sandbox)
@@ -274,7 +310,8 @@ def _cmd_probe_or_send(args: argparse.Namespace, raw_argv: list[str]) -> int:
         sandbox=not args.no_sandbox,
     )
     try:
-        result = asyncio.run(run_session(config))
+        # Default loop on purpose: the MFi helper uses asyncio subprocesses (Proactor on Windows).
+        result = aio.run(run_session(config), selector=False)
     except KeyboardInterrupt:
         emit(event="interrupted")
         return 0
@@ -288,6 +325,9 @@ def _cmd_probe_or_send(args: argparse.Namespace, raw_argv: list[str]) -> int:
 
 
 def _cmd_monitor(args: argparse.Namespace) -> int:
+    if not math.isfinite(args.duration) or not 0 < args.duration <= 86400:
+        print("错误: --duration 必须在 1..86400 秒之间", file=sys.stderr)
+        return 2
     print(
         f"==> 实时监听 iPhone 地区与 NMEA 筛查诊断事件（已脱敏，最多 {args.duration:.0f}s，Ctrl+C 退出）...",
         flush=True,
@@ -298,7 +338,7 @@ def _cmd_monitor(args: argparse.Namespace) -> int:
             print(f"[{item['level']}] {item['process']}: {item['message']}", flush=True)
 
     try:
-        asyncio.run(_run())
+        aio.run(_run())
         return 0
     except KeyboardInterrupt:
         return 0
@@ -324,49 +364,131 @@ def _cmd_locate(args: argparse.Namespace, raw_argv: list[str]) -> int:
         print(f"错误: {err}", file=sys.stderr)
         return 2
 
-    if not math.isfinite(args.hold) or args.hold < 0 or args.hold > 3600:
-        print("错误: --hold 必须在 0..3600 秒之间", file=sys.stderr)
+    if not math.isfinite(args.hold) or args.hold < 0 or args.hold > 86400:
+        print("错误: --hold 必须在 0..86400 秒之间（0 = 一直保持直到 Ctrl+C 或 awh restore）", file=sys.stderr)
         return 2
 
+    holder = active_dvt_holder()
+    if holder and not args.holder_process:
+        print(f"==> 检测到已有 DVT 定位保持进程 (PID {holder.get('pid')})，先停止它再切换新地点...")
+        aio.run(dvt_clear_location(serial=args.udid))
+
+    if args.detach and not args.holder_process:
+        # Use `--flag=value` syntax so negative coordinates or leading-dash labels never trip argparse.
+        child_argv = [
+            "locate",
+            "--engine=dvt",
+            f"--lat={lat:.7f}",
+            f"--lon={lon:.7f}",
+            f"--hold={args.hold}",
+            f"--label={label}",
+            "--holder-process",
+        ]
+        if args.udid:
+            child_argv.append(f"--udid={args.udid}")
+        proc, log_path = spawn_detached_holder(child_argv)
+        print(f"==> 后台定位保持进程已启动 (PID {proc.pid})，正在连接 iPhone...", flush=True)
+        ok, info = wait_for_holder(proc, log_path=log_path)
+        if not ok:
+            print(f"[FAIL] 后台 DVT 定位失败：\n{info}", file=sys.stderr)
+            return 1
+        print(
+            f"[OK] 已将 {info} 全局定位至 {label} ({lat:.4f}, {lon:.4f})，后台持续保持中。\n"
+            "     可关闭此窗口；保持 USB 连接。用完执行 `awh restore` 即可恢复真实 GPS。"
+        )
+        return 0
+
+    if not args.holder_process:
+        until = f"{args.hold:.0f} 秒后自动恢复" if args.hold > 0 else "按 Ctrl+C 或另开终端执行 awh restore 恢复"
+        print(f"==> 正在通过官方 DVT 通道定位到 {label} ({lat:.4f}, {lon:.4f})，{until}...", flush=True)
+
+    def _on_event(**ev: object) -> None:
+        emit(**ev)
+        if ev.get("event") == "location_applied" and not args.holder_process:
+            print(
+                f"[OK] {ev.get('device')} 已全局定位至 {label}！微信 / 苹果地图 / 高德等全部 App 生效"
+                "（无需关 Wi-Fi/流量）。\n"
+                "     注意：iOS 17+ 的模拟定位依赖本会话，请保持本窗口和 USB 连接；"
+                "想关掉窗口请改用 --detach。",
+                flush=True,
+            )
+
     try:
-        state = asyncio.run(
-            dvt_set_location(
-                lat,
-                lon,
-                label=label,
-                serial=args.udid,
-                hold_seconds=args.hold,
+        state = aio.run(
+            dvt_hold_location(
+                lat, lon, label=args.label or label, serial=args.udid,
+                hold_seconds=args.hold, on_event=_on_event,
             )
         )
     except KeyboardInterrupt:
-        emit(event="interrupted")
+        emit(event="interrupted", engine="dvt")
+        print("[OK] 已中断并恢复真实定位。")
         return 0
+    except DvtSetupError as err:
+        emit(event="error", engine="dvt", type="DvtSetupError", detail=str(err))
+        print(f"[FAIL] {err}", file=sys.stderr)
+        return 1
     except Exception as err:
-        emit(
-            event="error",
-            engine="dvt",
-            type=type(err).__name__,
-            detail=str(err),
-            hint="请确认 iPhone 已解锁、信任此电脑并开启「设置 → 隐私与安全性 → 开发者模式」；或改用 --engine iap2",
-        )
+        emit(event="error", engine="dvt", type=type(err).__name__, detail=str(err))
+        if args.debug:
+            raise
+        print(f"[FAIL] DVT 定位中断: {type(err).__name__}: {err}（加 --debug 查看完整堆栈）", file=sys.stderr)
         return 1
 
-    emit(
-        event="location_applied",
-        engine="dvt",
-        device=state.get("device"),
-        label=label,
-        latitude=lat,
-        longitude=lon,
-        cleared=bool(state.get("cleared", False)),
-    )
-    if not state.get("cleared"):
-        print(
-            f"[OK] 已通过官方 DVT 通道将 {state.get('device')} 全局定位至 {label} ({lat:.4f}, {lon:.4f})！\n"
-            "     微信 / 苹果地图 / 高德等全部 App 均已生效（无需关 Wi-Fi/流量）。\n"
-            "     用完执行 `awh restore` 即可无副作用秒恢复真实 GPS。"
-        )
+    emit(event="finished", engine="dvt", cleared=bool(state.get("cleared")),
+         acknowledged=bool(state.get("acknowledged")), reconnects=state.get("reconnects", 0))
+    if not args.holder_process:
+        print("[OK] DVT 会话已结束，已发送 stopLocationSimulation，手机恢复真实定位。")
     return 0
+
+
+def _cmd_devmode(args: argparse.Namespace) -> int:
+    """Show / reveal / enable iPhone Developer Mode (needed by the DVT engine on iOS 16+)."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.amfi import AmfiService
+
+    async def _run() -> int:
+        lockdown = await create_using_usbmux(serial=args.udid, connection_type="USB", autopair=True)
+        amfi: AmfiService | None = None
+        try:
+            enabled = await lockdown.get_developer_mode_status()
+            print(
+                f"{lockdown.all_values.get('DeviceName', 'iPhone')} iOS {lockdown.product_version}："
+                f"开发者模式{'已开启' if enabled else '未开启'}"
+            )
+            if enabled:
+                return 0
+            amfi = AmfiService(lockdown)
+            if args.enable:
+                print(
+                    "==> 请求开启开发者模式，iPhone 将自动重启"
+                    "（设置了锁屏密码的手机会被系统拒绝，请改用 --reveal）..."
+                )
+                await amfi.enable_developer_mode()
+                print("[OK] 已开启开发者模式。")
+                return 0
+            if args.reveal:
+                await amfi.reveal_developer_mode_option_in_ui()
+                print("[OK] 已在 iPhone 显示开关：设置 → 隐私与安全性 → 开发者模式 → 打开 → 重启 → 解锁后点【打开】。")
+                return 0
+            print("提示: 加 --reveal 显示设置开关（推荐），或 --enable 直接开启（仅限未设锁屏密码的手机）。")
+            return 1
+        finally:
+            # enable_developer_mode() may replace amfi._lockdown after reboot reconnect.
+            clients = [lockdown]
+            if amfi is not None and getattr(amfi, "_lockdown", None) not in (None, lockdown):
+                clients.append(amfi._lockdown)
+            for client in clients:
+                try:
+                    await client.close()
+                except Exception:
+                    pass
+
+    try:
+        return aio.run(_run())
+    except Exception as err:
+        print(f"错误: {type(err).__name__}: {err}\n  提示: {_hint_for(err)}", file=sys.stderr)
+        return 1
 
 
 def _cmd_restore(args: argparse.Namespace) -> int:
@@ -376,7 +498,7 @@ def _cmd_restore(args: argparse.Namespace) -> int:
 
     dvt_prev = read_dvt_state()
     if dvt_prev or args.force_dvt:
-        ok, dvt_msg = asyncio.run(dvt_clear_location(serial=args.udid))
+        ok, dvt_msg = aio.run(dvt_clear_location(serial=args.udid))
         print(f"[{'OK' if ok else 'WARN'}] DVT 官方定位: {dvt_msg}")
     else:
         print("[INFO] DVT 官方定位: 未检测到本工具记录的 DVT 模拟（如需强制清除请加 --force-dvt）")
@@ -388,14 +510,21 @@ def _cmd_restore(args: argparse.Namespace) -> int:
 
 def _cmd_clean(args: argparse.Namespace) -> int:
     stop_active_sender()
+    if active_dvt_holder():
+        try:
+            aio.run(dvt_clear_location())
+        except Exception as err:
+            print(f"[WARN] 清理前停止 DVT 保持进程失败: {err}", file=sys.stderr)
     removed: list[str] = []
+    skipped_locked: list[str] = []
 
     # Remove legacy bloated cache (e.g. old 32MB APK + nested uv + cloned repo).
     legacy_roots = {d.parent for d in legacy_identity_dirs()}
     for root in legacy_roots:
         if root.exists():
             shutil.rmtree(root, ignore_errors=True)
-            removed.append(str(root))
+            if not root.exists():
+                removed.append(str(root))
 
     # Remove Python bytecode caches inside project sources/tests (never touch .venv unless --all).
     for sub_dir in ("src", "tests"):
@@ -403,33 +532,42 @@ def _cmd_clean(args: argparse.Namespace) -> int:
         if base.exists():
             for pycache in base.rglob("__pycache__"):
                 shutil.rmtree(pycache, ignore_errors=True)
-                removed.append(str(pycache))
+                if not pycache.exists():
+                    removed.append(str(pycache))
     for cache_dir in (".pytest_cache", ".ruff_cache"):
         p = project_root() / cache_dir
         if p.exists():
             shutil.rmtree(p, ignore_errors=True)
-            removed.append(str(p))
+            if not p.exists():
+                removed.append(str(p))
 
     if args.all:
         dd = data_dir()
         if dd.exists():
             shutil.rmtree(dd, ignore_errors=True)
-            removed.append(str(dd))
+            (removed if not dd.exists() else skipped_locked).append(str(dd))
         venv = project_root() / ".venv"
         if venv.exists():
             shutil.rmtree(venv, ignore_errors=True)
-            removed.append(str(venv))
+            (removed if not venv.exists() else skipped_locked).append(str(venv))
     else:
-        # Preserve current identity, remove any leftover staging dirs.
+        # Preserve current identity, remove any leftover staging dirs and runtime files.
         dd = data_dir()
         if dd.exists():
             for child in dd.iterdir():
-                if child.name.startswith(".identity-") or child.suffix in (".apk", ".log", ".pid"):
+                if child.name.startswith(".identity-") or child.suffix in (
+                    ".apk",
+                    ".log",
+                    ".pid",
+                    ".stop",
+                    ".tmp",
+                ) or child.name == "dvt_last_clear.json":
                     if child.is_dir():
                         shutil.rmtree(child, ignore_errors=True)
                     else:
                         child.unlink(missing_ok=True)
-                    removed.append(str(child))
+                    if not child.exists():
+                        removed.append(str(child))
 
     if removed:
         print("已清理:")
@@ -437,6 +575,10 @@ def _cmd_clean(args: argparse.Namespace) -> int:
             print(f"  - {item}")
     else:
         print("无需清理，环境已保持干净。")
+    if skipped_locked:
+        print("提示: 以下目录因当前进程正在运行而无法立即删净（Windows 文件占用），退出后手动删除即可:")
+        for item in skipped_locked:
+            print(f"  - {item}")
     if not args.all:
         print(f"提示: 保留了当前 MFi 身份 ({identity_dir()})；如需彻底清空环境与身份请加 --all。")
     return 0
@@ -494,6 +636,12 @@ def build_parser() -> argparse.ArgumentParser:
             )
             p.add_argument("--lat", type=float, help="自定义纬度 (-90..90)")
             p.add_argument("--lon", type=float, help="自定义经度 (-180..180)")
+            p.add_argument(
+                "--coord-type",
+                choices=["wgs84", "gcj02", "bd09"],
+                default="wgs84",
+                help="输入坐标系：wgs84=标准GPS(默认)；gcj02=高德/腾讯/微信火星坐标自动纠偏；bd09=百度坐标自动纠偏",
+            )
             p.add_argument("--altitude", type=float, default=15.0, help="自定义海拔米数（默认 15.0）")
             p.add_argument("--interval", type=float, default=1.0, help="iAP2 最小发送间隔秒数（>=1，默认 1）")
         if name == "locate":
@@ -507,8 +655,22 @@ def build_parser() -> argparse.ArgumentParser:
                 "--hold",
                 type=float,
                 default=0.0,
-                help="DVT 引擎持续保持秒数（默认 0=注入后立即返回并持久生效直至 awh restore；>0=到期自动恢复）",
+                help="DVT 保持秒数（默认 0=一直保持直到 Ctrl+C / awh restore；>0=到期自动恢复真实定位）",
             )
+            p.add_argument(
+                "--detach",
+                action="store_true",
+                help="DVT 在后台进程中保持定位，命令立即返回，可关闭终端；用 awh restore 结束",
+            )
+            p.add_argument("--label", default="", help=argparse.SUPPRESS)
+            p.add_argument("--holder-process", action="store_true", help=argparse.SUPPRESS)
+            p.add_argument("--debug", action="store_true", help="失败时打印完整堆栈")
+
+    p_dm = sub.add_parser("devmode", help="查看/显示/开启 iPhone 开发者模式（DVT 定位必需，Windows 首次使用必看）")
+    p_dm.add_argument("--udid", help="指定目标 iPhone UDID")
+    g = p_dm.add_mutually_exclusive_group()
+    g.add_argument("--reveal", action="store_true", help="在 iPhone 设置中显示「开发者模式」开关（推荐）")
+    g.add_argument("--enable", action="store_true", help="直接开启并自动重启（仅限未设置锁屏密码的手机）")
 
     p_mon = sub.add_parser("monitor", help="实时监听脱敏后的 iPhone 定位筛查与健康地区判定日志")
     p_mon.add_argument("--udid", help="指定目标 iPhone UDID")
@@ -551,6 +713,7 @@ def main(argv: list[str] | None = None) -> int:
         "stop": _cmd_stop,
         "restore": _cmd_restore,
         "clean": _cmd_clean,
+        "devmode": _cmd_devmode,
     }
     if args.command in ("probe", "send"):
         return _cmd_probe_or_send(args, raw)

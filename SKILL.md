@@ -10,7 +10,7 @@ description: >
   不适用于血压数值测量、医疗诊断或商业批量代开。
 license: GPL-3.0-only
 metadata:
-  version: "2.2.0"
+  version: "2.3.0"
   platforms: "macOS, Windows"
 ---
 
@@ -72,18 +72,20 @@ metadata:
 
 ### 场景 B：通用任意地点全局改定位与无副作用恢复（微信 / 地图 / 全部 App · macOS & Windows）
 
-如果用户想把 iPhone 全局定位到任意城市/地标/经纬度（**开着 Wi-Fi / 5G 流量，微信、苹果地图、高德等全部生效**），直接用默认 **官方免 Root DVT 引擎**（需 iPhone 开启「设置 → 隐私与安全性 → 开发者模式」）：
+如果用户想把 iPhone 全局定位到任意城市/地标/经纬度（**开着 Wi-Fi / 5G 流量，微信、苹果地图、高德等全部生效**），直接用默认 **官方免 Root DVT 引擎**（需 iPhone 开启开发者模式；先跑 `devmode` 检查，未开启则 `devmode --reveal` 让设置里出现开关）：
 ```bash
-# 2 秒生效，开着 Wi-Fi/5G 也能让微信/地图/全部 App 秒跳目标地点
-./awh.sh locate --place "纽约"
-./awh.sh locate --place "东京"
-./awh.sh locate --place "Apple Park"
-./awh.sh locate --lat 48.8566 --lon 2.3522          # Windows 把 ./awh.sh 换成 awh.cmd
+./awh.sh devmode                                     # 未开启 → ./awh.sh devmode --reveal，指导用户打开并重启
+./awh.sh locate --place "纽约" --detach              # AI 助手推荐：后台保持，命令立即返回
+./awh.sh locate --place "东京"                       # 前台保持，Ctrl+C 恢复（适合用户自己在终端操作）
+./awh.sh locate --lat 39.9087 --lon 116.3975 --coord-type gcj02 --detach  # 高德/腾讯/微信坐标自动纠偏为 WGS-84
+./awh.sh locate --lat 48.8566 --lon 2.3522 --detach  # Windows 把 ./awh.sh 换成 awh.cmd
 ./awh.sh locate --place "纽约" --hold 600            # 保持 600 秒后自动恢复
 ```
+- **必须保持会话**：iOS 17+ 模拟定位随 DVT 会话结束而失效。AI 助手执行时**必须用 `--detach`**（否则命令会一直前台运行直到 Ctrl+C）；切换地点直接再执行一次 `locate --detach`，会自动替换旧的保持进程。首次在未连过 Xcode 的手机（尤其是 Windows）上运行时会自动挂载 DDI 并刷新隧道，请提醒用户保持手机解锁与电脑联网。
+- **坐标系纠偏**：用户若从高德/腾讯/微信地图提供中国大陆经纬度，必须加 `--coord-type gcj02`；百度地图加 `--coord-type bd09`（港澳台与海外无需转换，默认 `wgs84`）。
 - **双引擎分工**：
   - `send`（`--engine iap2`）：外置 MFi 硬件 GPS，**免开发者模式**，专门过 Apple 健康 `healthd` 地区校验（开通高血压通知必须用它）。
-  - `locate`（默认 `--engine dvt`）：Apple 官方免 Root Userspace 隧道 `LocationSimulation`，**支持开 Wi-Fi/5G 让微信、地图等全部 App 秒切全球任意坐标**。
+  - `locate`（默认 `--engine dvt`）：iOS 17+ 走 Apple 官方免 Root `UserspaceRsdTunnel` + DVT `LocationSimulation`（iOS 16 及以下自动切 `DtSimulateLocation`），**支持开 Wi-Fi/5G 让微信、地图等全部 App 秒切全球任意坐标**。
 - **无副作用一键恢复真实定位**（随时执行，自动同时清理 iAP2 发送器 + 发送官方 `stopLocationSimulation` 并等待手机确认）：
 ```bash
 ./awh.sh restore

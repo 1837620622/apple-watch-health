@@ -104,3 +104,16 @@ async def test_auth_provider_runs_python_helper_in_path_with_spaces(tmp_path) ->
         assert await auth.request("sign") == {"ok": "sign"}
     finally:
         await auth.close()
+
+
+async def test_auth_provider_rejects_malformed_helper_output(tmp_path) -> None:
+    from apple_watch_health.wire import ProtocolError
+
+    bad_script = tmp_path / "bad_helper.py"
+    bad_script.write_text("print('not-json', flush=True)\n", encoding="utf-8")
+    auth = AuthenticationProvider(str(bad_script))
+    try:
+        with pytest.raises(ProtocolError, match="JSON"):
+            await auth.request("certificate")
+    finally:
+        await auth.close()

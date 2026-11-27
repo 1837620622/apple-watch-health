@@ -151,6 +151,113 @@ PLACE_ALIASES: dict[str, tuple[str, float, float, float]] = {
 }
 
 _COORD_PAIR_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*[,，\s]\s*([+-]?\d+(?:\.\d+)?)\s*$")
+_MAX_GEOCODE_BYTES = 256 * 1024
+
+# --------------------------------------------------------------------------------------------
+# Coordinate datum conversion (GCJ-02 / BD-09 -> WGS-84, matching i4Tools/Aisi China offset)
+# --------------------------------------------------------------------------------------------
+
+_EARTH_A = 6378245.0
+_EARTH_EE = 0.00669342162296594323
+_X_PI = math.pi * 3000.0 / 180.0
+
+
+def _out_of_china_mainland(lat: float, lon: float) -> bool:
+    """Approximate China mainland bounding check (GCJ-02 applies only inside mainland China)."""
+    if not (72.004 <= lon <= 137.8347 and 0.8293 <= lat <= 55.8271):
+        return True
+    # Exclude Hong Kong / Macao / Taiwan core boxes so HK/MO/TW coordinates are never shifted.
+    if 22.10 <= lat <= 22.56 and 113.45 <= lon <= 114.45:
+        return True
+    if 21.80 <= lat <= 25.40 and 119.30 <= lon <= 122.10:
+        return True
+    return False
+
+
+def _gcj_delta(lat: float, lon: float) -> tuple[float, float]:
+    x = lon - 105.0
+    y = lat - 35.0
+    dlat = (
+        -100.0
+        + 2.0 * x
+        + 3.0 * y
+        + 0.2 * y * y
+        + 0.1 * x * y
+        + 0.2 * math.sqrt(abs(x))
+        + (20.0 * math.sin(6.0 * x * math.pi) + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+        + (20.0 * math.sin(y * math.pi) + 40.0 * math.sin(y / 3.0 * math.pi)) * 2.0 / 3.0
+        + (160.0 * math.sin(y / 12.0 * math.pi) + 320.0 * math.sin(y * math.pi / 30.0)) * 2.0 / 3.0
+    )
+    dlon = (
+        300.0
+        + x
+        + 2.0 * y
+        + 0.1 * x * x
+        + 0.1 * x * y
+        + 0.1 * math.sqrt(abs(x))
+        + (20.0 * math.sin(6.0 * x * math.pi) + 20.0 * math.sin(2.0 * x * math.pi)) * 2.0 / 3.0
+        + (20.0 * math.sin(x * math.pi) + 40.0 * math.sin(x / 3.0 * math.pi)) * 2.0 / 3.0
+        + (150.0 * math.sin(x / 12.0 * math.pi) + 300.0 * math.sin(x / 30.0 * math.pi)) * 2.0 / 3.0
+    )
+    rad_lat = lat / 180.0 * math.pi
+    magic = math.sin(rad_lat)
+    magic = 1.0 - _EARTH_EE * magic * magic
+    sqrt_magic = math.sqrt(magic)
+    dlat = (dlat * 180.0) / ((_EARTH_A * (1.0 - _EARTH_EE)) / (magic * sqrt_magic) * math.pi)
+    dlon = (dlon * 180.0) / (_EARTH_A / sqrt_magic * math.cos(rad_lat) * math.pi)
+    return dlat, dlon
+
+
+def wgs84_to_gcj02(lat: float, lon: float) -> tuple[float, float]:
+    """Convert WGS-84 coordinate to GCJ-02 (Mars coordinate used by AMap/WeChat in mainland China)."""
+    if _out_of_china_mainland(lat, lon):
+        return lat, lon
+    dlat, dlon = _gcj_delta(lat, lon)
+    return lat + dlat, lon + dlon
+
+
+def gcj02_to_wgs84(lat: float, lon: float) -> tuple[float, float]:
+    """Convert GCJ-02 (AMap/Tencent/WeChat) coordinate to WGS-84 via fixed-point iteration (<1cm)."""
+    if _out_of_china_mainland(lat, lon):
+        return lat, lon
+    w_lat, w_lon = lat, lon
+    for _ in range(10):
+        g_lat, g_lon = wgs84_to_gcj02(w_lat, w_lon)
+        d_lat = g_lat - lat
+        d_lon = g_lon - lon
+        w_lat -= d_lat
+        w_lon -= d_lon
+        if max(abs(d_lat), abs(d_lon)) < 1e-8:
+            break
+    return w_lat, w_lon
+
+
+def bd09_to_gcj02(lat: float, lon: float) -> tuple[float, float]:
+    """Convert BD-09 (Baidu Maps) coordinate to GCJ-02."""
+    x = lon - 0.0065
+    y = lat - 0.006
+    z = math.sqrt(x * x + y * y) - 0.00002 * math.sin(y * _X_PI)
+    theta = math.atan2(y, x) - 0.000003 * math.cos(x * _X_PI)
+    return z * math.sin(theta), z * math.cos(theta)
+
+
+def convert_to_wgs84(lat: float, lon: float, coord_type: str = "wgs84") -> tuple[float, float]:
+    """Convert user-provided coordinates (wgs84/gcj02/bd09) into iOS CoreLocation WGS-84."""
+    format_nmea_coordinate(lat, is_latitude=True)
+    format_nmea_coordinate(lon, is_latitude=False)
+    kind = coord_type.strip().lower()
+    if kind == "wgs84":
+        return lat, lon
+    if kind == "gcj02":
+        w_lat, w_lon = gcj02_to_wgs84(lat, lon)
+    elif kind == "bd09":
+        g_lat, g_lon = bd09_to_gcj02(lat, lon)
+        w_lat, w_lon = gcj02_to_wgs84(g_lat, g_lon)
+    else:
+        raise ValueError(f"不支持的坐标系类型: {coord_type!r}（仅支持 wgs84 / gcj02 / bd09）")
+    format_nmea_coordinate(w_lat, is_latitude=True)
+    format_nmea_coordinate(w_lon, is_latitude=False)
+    return w_lat, w_lon
 
 
 def resolve_place(query: str, *, allow_online: bool = True) -> tuple[float, float, float, str]:
@@ -185,18 +292,28 @@ def resolve_place(query: str, *, allow_online: bool = True) -> tuple[float, floa
     url = f"https://nominatim.openstreetmap.org/search?{encoded}"
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "apple-watch-health/2.0 (https://github.com/1837620622/apple-watch-health)"},
+        headers={"User-Agent": "apple-watch-health/2.3 (https://github.com/1837620622/apple-watch-health)"},
     )
     try:
         with urllib.request.urlopen(req, timeout=12.0) as resp:
-            items = json.loads(resp.read().decode("utf-8"))
+            if not resp.geturl().startswith("https://"):
+                raise ValueError("地名解析服务重定向到非 HTTPS 地址")
+            body = resp.read(_MAX_GEOCODE_BYTES + 1)
+            if len(body) > _MAX_GEOCODE_BYTES:
+                raise ValueError("地名解析响应体积异常")
+            items = json.loads(body.decode("utf-8"))
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError(f"在线解析地点 {raw!r} 失败（{exc}），请直接用 --lat/--lon 指定坐标") from exc
 
-    if not items:
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
         raise ValueError(f"未找到地点 {raw!r}，请换更具体的地名或直接传入 --lat/--lon")
     top = items[0]
-    lat, lon = float(top["lat"]), float(top["lon"])
+    try:
+        lat, lon = float(top["lat"]), float(top["lon"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"在线地名服务返回坐标格式异常: {exc}") from exc
     format_nmea_coordinate(lat, is_latitude=True)
     format_nmea_coordinate(lon, is_latitude=False)
     label = str(top.get("display_name", raw))[:80]

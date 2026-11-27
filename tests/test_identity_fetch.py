@@ -13,8 +13,11 @@ import pytest
 from apple_watch_health.identity_fetch import (
     ASSETS,
     IdentityImportError,
+    ZipEntryMeta,
+    extract_entry_from_local_bytes,
     extract_identity_from_apk_bytes,
     fetch_identity_via_range,
+    read_apk_file_bounded,
     safe_destination,
     write_identity_atomic,
 )
@@ -108,3 +111,53 @@ def test_refuses_saving_credentials_inside_repo_or_symlink(tmp_path) -> None:
         pytest.skip("Symlink creation not permitted in this environment")
     with pytest.raises(IdentityImportError, match="符号链接"):
         safe_destination(link)
+    with pytest.raises(IdentityImportError, match="符号链接"):
+        safe_destination(link / "nested" / "identity")
+
+
+def test_deflate_bomb_is_blocked_by_bounded_decompressor() -> None:
+    import struct
+    import zlib
+
+    # 128 KB of zeros compresses tiny, but exceeds MAX_IDENTITY_BYTES (16 KB) when inflated.
+    raw_bomb = b"\x00" * (128 * 1024)
+    comp_obj = zlib.compressobj(level=9, wbits=-zlib.MAX_WBITS)
+    compressed = comp_obj.compress(raw_bomb) + comp_obj.flush()
+    name = b"assets/offline-mfi/identity.pk8"
+    local_hdr = struct.pack(
+        "<4sHHHHHIIIHH",
+        b"PK\x03\x04",
+        20,
+        0,
+        8,
+        0,
+        0,
+        zlib.crc32(raw_bomb) & 0xFFFFFFFF,
+        len(compressed),
+        1024,  # spoofed small declared size
+        len(name),
+        0,
+    )
+    meta = ZipEntryMeta(
+        filename=name.decode(),
+        compress_type=8,
+        crc32=zlib.crc32(raw_bomb) & 0xFFFFFFFF,
+        compress_size=len(compressed),
+        file_size=1024,
+        header_offset=0,
+    )
+    with pytest.raises(IdentityImportError, match="超限"):
+        extract_entry_from_local_bytes(local_hdr + name + compressed, meta)
+
+
+def test_read_apk_file_bounded_rejects_empty_and_oversized(tmp_path, monkeypatch) -> None:
+    empty = tmp_path / "empty.apk"
+    empty.write_bytes(b"")
+    with pytest.raises(IdentityImportError):
+        read_apk_file_bounded(empty)
+
+    monkeypatch.setattr("apple_watch_health.identity_fetch.MAX_APK_BYTES", 32)
+    big = tmp_path / "big.apk"
+    big.write_bytes(b"A" * 64)
+    with pytest.raises(IdentityImportError):
+        read_apk_file_bounded(big)

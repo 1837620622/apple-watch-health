@@ -66,3 +66,20 @@ location_link_acknowledged NMEA 报文获链路层 ACK（仅代表送达，不�
 location_stopped           手机暂停当前订阅 (0xFFFC)
 finished                   会话结束并释放锁与资源
 ```
+
+---
+
+## 五、DVT `locate` 全局改定位排障（2.3.0）
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| 定位改过去几秒后又跳回真实位置 | iOS 17+ 模拟定位只在 DVT 会话存活期间有效；2.2.0 注入后立即断开会话 | 升级 2.3.0：`locate` 默认前台保持，或用 `--detach` 后台保持；不要关闭前台窗口 |
+| Windows 上 `locate` 卡住 / 报 SSL、`NotImplementedError`、超时 | Windows 默认 Proactor 事件循环与 DTX strip-SSL、用户态隧道不兼容 | 2.3.0 已强制 Selector 事件循环；仍失败请加 `--debug` 收集堆栈 |
+| 提示「未开启开发者模式」 / Windows 设置里找不到开关 | 没连过 Xcode 的 iPhone 默认隐藏该开关 | `awh devmode --reveal` → 设置 → 隐私与安全性 → 开发者模式 → 打开 → 重启 → 解锁后点【打开】 |
+| `UserspaceTunnelUnavailableError` | iOS 17.0–17.3 没有 CoreDeviceProxy，需要同一 Wi-Fi 走 RemotePairing | 升级到 iOS 17.4+，或让电脑和手机连同一 Wi-Fi |
+| 后台 `--detach` 失败 | 后台进程启动后无法连接手机 | 命令会打印后台日志末尾；完整日志在数据缓存目录的 `dvt.log` |
+| `restore` 后地图仍停在模拟位置 | 未回执或会话已断 | 再执行 `awh restore --force-dvt`；兜底重启 iPhone 一定恢复 |
+| `awh.cmd` 中文乱码 / 参数里的 `!` 消失 | 批处理为 LF 换行且开启了延迟变量扩展 | 2.3.0 已改为 CRLF 并移除 `enabledelayedexpansion`（`.gitattributes` 保证 git 检出不再变回 LF） |
+| 中国大陆定位偏差 300–600 米 | 高德/腾讯/微信用 GCJ-02，百度用 BD-09，而 iPhone 底层只认 WGS-84 | 从高德/腾讯/微信复制的坐标加 `--coord-type gcj02`，百度加 `--coord-type bd09` 自动精准纠偏 |
+| Windows 首次 `locate` 报 `InvalidServiceError` | 手机未挂载 Developer Disk Image (DDI) 且旧 RSD 缓存无 `dtservicehub` | 2.3.0 会自动联网挂载 DDI 后重建隧道刷新服务表；确保已开开发者模式、屏幕解锁且电脑能访问 GitHub/Apple |
+| Windows `awh stop` 后仍有残留 `python` 子进程 | Windows 上 `os.kill(SIGTERM)` 直接强杀跳过清理 | 2.3.0 改为停止文件优雅关闭 + 超时 `taskkill /T /F` 整树清理，彻底避免 MFi 助手残留 |

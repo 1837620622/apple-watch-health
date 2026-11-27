@@ -105,10 +105,18 @@ def validate_identity(certificate: bytes, encoded_key: bytes) -> ec.EllipticCurv
     return key
 
 
+def _read_bounded_file(path: Path, limit: int = MAX_IDENTITY_BYTES) -> bytes:
+    with path.open("rb") as fh:
+        data = fh.read(limit + 1)
+    if not data or len(data) > limit:
+        raise ProviderError(f"Identity files must be 1..{limit} bytes")
+    return data
+
+
 def inspect_identity_files(cert_path: Path, key_path: Path) -> dict[str, str | int | bool]:
     """Validate local identity files and return non-sensitive summary metadata."""
-    cert_bytes = cert_path.read_bytes()
-    key_bytes = key_path.read_bytes()
+    cert_bytes = _read_bounded_file(cert_path)
+    key_bytes = _read_bounded_file(key_path)
     validate_identity(cert_bytes, key_bytes)
     return {
         "valid": True,

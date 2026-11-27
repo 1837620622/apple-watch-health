@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -87,7 +87,7 @@ remote = [
 
 [[package]]
 name = "apple-watch-health"
-version = "2.2.0"
+version = "2.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -105,7 +105,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=43.0.0" },
-    { name = "pymobiledevice3", specifier = ">=11.0.0" },
+    { name = "pymobiledevice3", specifier = ">=11.65.0,<12" },
     { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=306" },
 ]
 

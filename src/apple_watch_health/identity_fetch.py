@@ -85,13 +85,14 @@ class ZipEntryMeta:
     header_offset: int
 
 
-def _github_headers(accept: str | None = None) -> dict[str, str]:
-    headers = {"User-Agent": "apple-watch-health/2.0"}
+def _github_headers(accept: str | None = None, *, send_auth: bool = False) -> dict[str, str]:
+    headers = {"User-Agent": "apple-watch-health/2.3"}
     if accept:
         headers["Accept"] = accept
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if send_auth:
+        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -99,12 +100,12 @@ def resolve_download_url(timeout: float = 20.0) -> str:
     """Resolve signed HTTPS CDN URL via GitHub API (China-friendly) or direct release URL."""
     opener = urllib.request.build_opener(_NoRedirect)
     candidates = [
-        (DIPLAY_ASSET_API, "application/octet-stream"),
-        (DIPLAY_DIRECT_URL, None),
+        (DIPLAY_ASSET_API, "application/octet-stream", True),
+        (DIPLAY_DIRECT_URL, None, False),
     ]
     errors: list[str] = []
-    for url, accept in candidates:
-        req = urllib.request.Request(url, headers=_github_headers(accept))
+    for url, accept, send_auth in candidates:
+        req = urllib.request.Request(url, headers=_github_headers(accept, send_auth=send_auth))
         try:
             with opener.open(req, timeout=timeout) as resp:
                 final_url = resp.geturl()
@@ -127,10 +128,13 @@ def _http_range_get(url: str, start: int, end: int, timeout: float = 30.0) -> tu
     """Fetch inclusive byte range [start, end] over HTTPS and return (data, total_size)."""
     if not url.startswith("https://"):
         raise IdentityImportError("Refused non-HTTPS download URL")
+    if start < 0 or end < start:
+        raise IdentityImportError(f"无效的 Range 字节范围: {start}-{end}")
+    expected = end - start + 1
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "apple-watch-health/2.0",
+            "User-Agent": "apple-watch-health/2.3",
             "Range": f"bytes={start}-{end}",
         },
     )
@@ -143,9 +147,12 @@ def _http_range_get(url: str, start: int, end: int, timeout: float = 30.0) -> tu
         match = _CONTENT_RANGE_RE.match(cr.strip())
         if not match:
             raise IdentityImportError(f"无效的 Content-Range 响应头: {cr!r}")
-        total = int(match.group(3))
-        data = resp.read()
-        expected = end - start + 1
+        r_start, r_end, total = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        if r_start != start or r_end != end:
+            raise IdentityImportError(
+                f"Content-Range 偏移不符: 期望 {start}-{end}，实收 {r_start}-{r_end}"
+            )
+        data = resp.read(expected + 1)
         if len(data) != expected:
             raise IdentityImportError(f"Range 数据长度不符: 期望 {expected}，实收 {len(data)}")
         return data, total
@@ -221,7 +228,15 @@ def extract_entry_from_local_bytes(buf: bytes, meta: ZipEntryMeta) -> bytes:
     if meta.compress_type == 0:
         raw = compressed
     elif meta.compress_type == 8:
-        raw = zlib.decompress(compressed, -zlib.MAX_WBITS, MAX_IDENTITY_BYTES + 1)
+        # Use decompressobj(max_length=...) to enforce a hard memory bound against deflate bombs.
+        decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
+        raw = decompressor.decompress(compressed, MAX_IDENTITY_BYTES + 1)
+        if decompressor.unconsumed_tail or len(raw) > MAX_IDENTITY_BYTES:
+            raise IdentityImportError(f"解压后大小超限（疑似异常压缩流）: {meta.filename}")
+        tail = decompressor.flush(MAX_IDENTITY_BYTES + 1 - len(raw))
+        raw += tail
+        if not decompressor.eof or len(raw) > MAX_IDENTITY_BYTES:
+            raise IdentityImportError(f"解压数据不完整或超限: {meta.filename}")
     else:
         raise IdentityImportError(f"不支持的 ZIP 压缩方式: {meta.compress_type}")
     if len(raw) != meta.file_size or len(raw) > MAX_IDENTITY_BYTES:
@@ -264,7 +279,10 @@ def fetch_identity_via_range(
     # Coalesce adjacent entries into a single HTTP Range fetch when within 64 KB of each other.
     ordered = sorted(metas.values(), key=lambda m: m.header_offset)
     span_start = ordered[0].header_offset
-    span_end = max(m.header_offset + 30 + len(m.filename) + 2048 + m.compress_size for m in ordered)
+    span_end = max(
+        m.header_offset + 30 + len(m.filename.encode("utf-8")) + 2048 + m.compress_size
+        for m in ordered
+    )
     span_end = min(total_size - 1, span_end)
 
     extracted_by_asset: dict[str, bytes] = {}
@@ -277,7 +295,7 @@ def fetch_identity_via_range(
         for meta in ordered:
             end = min(
                 total_size - 1,
-                meta.header_offset + 30 + len(meta.filename) + 2048 + meta.compress_size,
+                meta.header_offset + 30 + len(meta.filename.encode("utf-8")) + 2048 + meta.compress_size,
             )
             chunk, _ = getter(target_url, meta.header_offset, end)
             extracted_by_asset[meta.filename] = extract_entry_from_local_bytes(chunk, meta)
@@ -376,11 +394,28 @@ def download_full_apk_concurrent(
     return b"".join(parts[i] for i in range(len(ranges)))
 
 
+def _read_file_bounded(path: Path, max_bytes: int, label: str) -> bytes:
+    expanded = path.expanduser()
+    with expanded.open("rb") as fh:
+        data = fh.read(max_bytes + 1)
+    if not data or len(data) > max_bytes:
+        raise IdentityImportError(f"{label} 大小必须在 1..{max_bytes} 字节之间")
+    return data
+
+
+def read_apk_file_bounded(apk_path: Path) -> bytes:
+    """Read a local APK file with a hard upper bound to prevent OOM."""
+    return _read_file_bounded(apk_path, MAX_APK_BYTES, "本地 APK 文件")
+
+
 def safe_destination(dest: Path) -> Path:
-    """Reject symlink destinations or paths inside the source repository."""
+    """Reject symlink destinations (including symlink parents) or paths inside the source repository."""
     expanded = dest.expanduser()
-    if expanded.is_symlink():
-        raise IdentityImportError("身份目录不能是符号链接")
+    cur = expanded
+    # Walk un-resolved components so symlinks on the target or any parent are caught.
+    for candidate in (cur, *cur.parents):
+        if candidate.is_symlink():
+            raise IdentityImportError("身份目录及其父路径不能包含符号链接")
     resolved = expanded.resolve()
     repo_root = project_root().resolve()
     if resolved == repo_root or resolved.is_relative_to(repo_root):
@@ -405,12 +440,12 @@ def write_identity_atomic(
     ensure_private_dir(target.parent)
     staging = Path(tempfile.mkdtemp(prefix=".identity-stage-", dir=str(target.parent)))
     try:
-        restrict_permissions(staging, is_dir=True)
+        restrict_permissions(staging, is_dir=True, strict=True)
         for filename in (CERT_FILENAME, KEY_FILENAME):
             out = staging / filename
             if os.name == "nt":
                 out.write_bytes(identity[filename])
-                restrict_permissions(out, is_dir=False)
+                restrict_permissions(out, is_dir=False, strict=True)
             else:
                 fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "wb") as fh:
@@ -428,7 +463,7 @@ def write_identity_atomic(
             shutil.rmtree(backup, ignore_errors=True)
         else:
             staging.rename(target)
-        restrict_permissions(target, is_dir=True)
+        restrict_permissions(target, is_dir=True, strict=True)
         return target
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
@@ -437,8 +472,8 @@ def write_identity_atomic(
 
 def import_local_pair(cert_path: Path, key_path: Path, destination: Path | None = None) -> Path:
     """Validate and copy a user-supplied local certificate + private key pair."""
-    cert_bytes = cert_path.expanduser().read_bytes()
-    key_bytes = key_path.expanduser().read_bytes()
+    cert_bytes = _read_file_bounded(cert_path, MAX_IDENTITY_BYTES, "证书文件")
+    key_bytes = _read_file_bounded(key_path, MAX_IDENTITY_BYTES, "私钥文件")
     validate_identity(cert_bytes, key_bytes)
     return write_identity_atomic(
         {CERT_FILENAME: cert_bytes, KEY_FILENAME: key_bytes},

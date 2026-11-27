@@ -88,21 +88,34 @@ cd apple-watch-health
 
 ## 任意地点全局改定位与恢复（微信 / 地图全生效 · 零副作用）
 
-日常想把 **微信、苹果地图、高德等全部 App** 定位到世界任意角落（开着 Wi-Fi 和 5G 流量照样生效），先在 iPhone 打开一次 `设置 → 隐私与安全性 → 开发者模式`，然后一行命令秒改（免 `sudo` / 免管理员权限，macOS & Windows 通用）：
+参考爱思助手原生开发者定位方案（**iOS 17+ 免 Root `UserspaceRsdTunnel` + DVT `LocationSimulation` + 自动挂载 DDI；iOS 16 及以下自动切 `DtSimulateLocation`**），日常把 **微信、苹果地图、高德等全部 App** 定位到世界任意角落（开着 Wi-Fi 和 5G 流量照样生效），免 `sudo` / 免管理员权限，macOS & Windows 通用：
 
 ```bash
-# 秒切全球任意地点（内置 30+ 热门城市离线解析，任意地标自动解析，开着 Wi-Fi/5G 直接生效）
-./awh.sh locate --place "纽约"
-./awh.sh locate --place "东京"
-./awh.sh locate --place "Apple Park"
-./awh.sh locate --lat 51.5074 --lon -0.1278            # Windows 把 ./awh.sh 换成 awh.cmd
-./awh.sh locate --place "纽约" --hold 600              # 定时保持 600 秒后自动恢复
+# 0) 首次使用：确认/打开开发者模式（Windows 没装过 Xcode 时设置里默认看不到这个开关）
+./awh.sh devmode               # 查看状态
+./awh.sh devmode --reveal      # 在 iPhone「设置 → 隐私与安全性」里显示「开发者模式」开关 → 打开 → 重启 → 点【打开】
 
-# 一键恢复真实定位（停 iAP2 + 发官方 stopLocationSimulation 并等待手机确认，零系统副作用）
+# 1) 前台保持（推荐）：窗口开着就一直生效，Ctrl+C 立即恢复真实定位
+./awh.sh locate --place "纽约"
+./awh.sh locate --lat 51.5074 --lon -0.1278            # Windows 把 ./awh.sh 换成 awh.cmd
+
+# 2) 高德 / 腾讯 / 微信 / 百度选点不偏移（与爱思助手同款中国大陆火星/百度坐标纠偏）
+./awh.sh locate --lat 39.9087 --lon 116.3975 --coord-type gcj02   # 高德 / 腾讯 / 微信坐标自动转 WGS-84
+./awh.sh locate --lat 39.9151 --lon 116.4039 --coord-type bd09    # 百度地图坐标自动转 WGS-84
+
+# 3) 后台保持：命令立刻返回，可关闭终端，用 restore 结束
+./awh.sh locate --place "东京" --detach
+
+# 4) 定时：保持 600 秒后自动恢复
+./awh.sh locate --place "Apple Park" --hold 600
+
+# 一键恢复真实定位（停后台保持进程 + 发官方 stopLocationSimulation，零系统副作用）
 ./awh.sh restore
 ```
 
-> 给 AI 助手直接说人话就行，例如：「帮我把手机定位改到美国纽约」「用完了，帮我恢复真实定位」。
+> **为什么要「保持」？** iOS 17+ 的 DVT 模拟定位只在设置它的会话存活期间有效，会话一断手机就会回到真实 GPS。2.3.0 起 `locate` 会一直保持会话（每 10 秒刷新一次坐标、USB 抖动自动重连；首次未挂载 DDI 会自动挂载并刷新隧道），旧版「注入后立即退出」会导致定位几秒内就跳回原处。
+
+> 给 AI 助手直接说人话就行，例如：「帮我把手机定位改到美国纽约」「把这个高德坐标用 gcj02 纠偏定位过去」「用完了，帮我恢复真实定位」。
 
 ---
 
@@ -156,6 +169,8 @@ Windows 端代码已通过 GitHub Actions `windows-latest` 完整单测与 `awh.
 1. **装微软商店版「Apple 设备」驱动**：管理员终端运行 `winget install --id 9NP83LWLPZ9K`，装完重启一次电脑。**别同时装旧版官网 exe 安装包版 iTunes**，驱动会打架。
 2. **插主板原生 USB 口**：优先插机箱背后主板口，别用供电不稳的前置口或廉价扩展坞；在「Apple 设备」里点完「信任」识别成功后，**把「Apple 设备」窗口关掉**，别让它占着 USB。
 3. 先跑 `awh.cmd doctor`，看到 `[OK] USB 服务: Apple Mobile Device Service (127.0.0.1:27015) 运行中` 且读出你的手机和手表型号，就可以按上面的步骤走。
+4. **DVT 改定位前先跑 `awh.cmd devmode --reveal`**：Windows 上从没连过 Xcode 的 iPhone，设置里不会出现「开发者模式」开关；这条命令让它显示出来，打开并重启后 `doctor` 会显示「开发者模式: 已开启」。首次改定位时若手机尚未挂载 DDI，工具会自动联网下载挂载并刷新隧道，请保持网络通畅与屏幕解锁。
+5. 2.3.0 已彻底修复 Windows 上 DVT 定位失败/卡住（强制 Selector 事件循环、DDI 挂载后重连刷新 RSD 服务表、iOS 16 及以下切原生 `DtSimulateLocation`）、Windows `awh stop` 泄露 MFi 子进程，以及 `awh.cmd` 换行/参数 `!` 与负坐标解析问题。
 
 更多排障见 [references/troubleshooting.md](references/troubleshooting.md)。
 
@@ -171,8 +186,10 @@ Windows 端代码已通过 GitHub Actions `windows-latest` 完整单测与 `awh.
 | `presets` | 查看内置坐标预设（`hk`, `hk-tst`, `mo`, `us-sf`, `us-ny`, `jp`, `sg`, `tw`） |
 | `setup` | 极速提取本地 MFi 身份（支持 `--full-apk`、`--apk`、`--cert/--key`、`--force`） |
 | `probe` | 仅做 USB iAP2 识别与 MFi-v3 握手测试，不发坐标 |
-| `send` / `locate` | 推送坐标到任意地点（`--place "地名"`、`--preset`、`--lat/--lon`、`--udid`、`--duration`） |
-| `restore` | 停止推送并无副作用恢复 iPhone 真实定位 |
+| `send` | iAP2 推送坐标（开健康功能用；`--place`、`--preset`、`--lat/--lon`、`--udid`、`--duration`） |
+| `locate` | 全局改定位（默认官方免 Root DVT / iOS<=16 `DtSimulateLocation`；支持 `--detach`、`--hold N`、`--coord-type wgs84\|gcj02\|bd09`、`--engine iap2`） |
+| `devmode` | 查看开发者模式；`--reveal` 显示设置开关，`--enable` 直接开启（仅限无锁屏密码） |
+| `restore` | 停止 iAP2 推送与 DVT 保持进程，无副作用恢复 iPhone 真实定位 |
 | `monitor` | 实时查看脱敏后的 iPhone 定位筛查（`GPRMC`）与健康地区状态日志 |
 | `stop` | 停止后台发送进程并释放 PID 锁 |
 | `clean` | 清理缓存与残留；加 `--all` 彻底删除身份文件与 `.venv` |

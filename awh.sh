@@ -38,4 +38,4 @@ if [ -n "${AWH_PYPI_MIRROR:-}" ] && [ -z "${UV_DEFAULT_INDEX:-}" ]; then
   export UV_DEFAULT_INDEX="$AWH_PYPI_MIRROR"
 fi
 
-exec "$UV_BIN" run --project "$ROOT" awh "$@"
+exec "$UV_BIN" run --quiet --project "$ROOT" awh "$@"

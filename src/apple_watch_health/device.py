@@ -140,6 +140,7 @@ class DeviceSummary:
     watches: tuple[WatchSummary, ...] = ()
     watch_probe_note: str | None = None
     error: str | None = None
+    developer_mode: bool | None = None
 
     @property
     def ios_major(self) -> int:
@@ -246,6 +247,9 @@ async def _probe_paired_watches(lockdown_client: Any) -> tuple[tuple[WatchSummar
                 pass
 
 
+WINDOWS_AMDS_SERVICE_NAMES = ("Apple Mobile Device Service", "AppleMobileDeviceService")
+
+
 def check_windows_usbmux_ready() -> tuple[bool, str]:
     """Check whether Windows Apple Mobile Device Service (usbmuxd on port 27015) is reachable."""
     if os.name != "nt":
@@ -254,29 +258,38 @@ def check_windows_usbmux_ready() -> tuple[bool, str]:
         with socket.create_connection(("127.0.0.1", 27015), timeout=1.5):
             return True, "Apple Mobile Device Service (127.0.0.1:27015) 运行中"
     except OSError:
-        # Distinguish "not installed" vs "service stopped" to give exact beginner remediation.
+        pass
+    # Distinguish "not installed" vs "service stopped". `sc query` output is localized except
+    # for the numeric STATE code, so match "STATE ... : 1" (STOPPED) / ": 4" (RUNNING).
+    for name in WINDOWS_AMDS_SERVICE_NAMES:
         try:
             proc = subprocess.run(
-                ["sc", "query", "Apple Mobile Device Service"],
+                ["sc", "query", name],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=5,
                 check=False,
             )
-            out = (proc.stdout or "") + (proc.stderr or "")
-            if "STOPPED" in out.upper():
-                return (
-                    False,
-                    "Apple Mobile Device Service 已安装但未启动！请用管理员 CMD 执行："
-                    'net start "Apple Mobile Device Service"',
-                )
-        except OSError:
-            pass
-        return (
-            False,
-            "未检测到 Apple USB 驱动服务 (127.0.0.1:27015)。请先安装微软商店版「Apple 设备」并重启："
-            "winget install --id 9NP83LWLPZ9K（不要与旧版 iTunes 同时安装）",
-        )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        out = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode == 0 and re.search(r":\s*1\s", out):
+            return (
+                False,
+                f"{name} 已安装但未启动！请用管理员 CMD 执行："
+                f'net start "{name}"（或重启电脑后重插 USB）',
+            )
+        if proc.returncode == 0:
+            return (
+                False,
+                f"{name} 已安装但 127.0.0.1:27015 不通：请重启该服务或电脑，并确认没有安全软件拦截本地端口",
+            )
+    return (
+        False,
+        "未检测到 Apple USB 驱动服务 (127.0.0.1:27015)。请安装微软商店版「Apple 设备」并重启："
+        "winget install --id 9NP83LWLPZ9K -s msstore（或安装 Apple 官网版 iTunes，二者不要同时装）",
+    )
 
 
 async def discover_usb_devices(*, include_network: bool = False) -> list[DeviceSummary]:
@@ -303,6 +316,13 @@ async def discover_usb_devices(*, include_network: bool = False) -> list[DeviceS
             vals = client.all_values or {}
             product_type = str(vals.get("ProductType", "Unknown"))
             watches, watch_note = await _probe_paired_watches(client)
+            dev_mode: bool | None = None
+            try:
+                dev_mode = bool(
+                    await asyncio.wait_for(_maybe_await(client.get_developer_mode_status()), 4.0)
+                )
+            except Exception:
+                dev_mode = None
             summaries.append(
                 DeviceSummary(
                     udid=serial,
@@ -317,6 +337,7 @@ async def discover_usb_devices(*, include_network: bool = False) -> list[DeviceS
                     trusted=bool(vals.get("ProductVersion")),
                     watches=watches,
                     watch_probe_note=watch_note,
+                    developer_mode=dev_mode,
                 )
             )
         except Exception as exc:
@@ -346,8 +367,21 @@ async def discover_usb_devices(*, include_network: bool = False) -> list[DeviceS
 
 def sanitize_log_message(text: str) -> str:
     """Strip coordinates, emails, and long hex identifiers before displaying diagnostic lines."""
-    text = re.sub(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{16}", "<UDID>", text)
+    # Modern (8-16) and legacy (40-hex) Apple UDIDs.
+    text = re.sub(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{16}\b", "<UDID>", text)
+    text = re.sub(r"\b[0-9a-fA-F]{40}\b", "<UDID>", text)
     text = re.sub(r"[\w.+-]+@[\w-]+\.[\w.-]+", "<EMAIL>", text)
+    # Keyed lat/lon values and decimal coordinate pairs (e.g. "+22.2819, +114.1589").
+    text = re.sub(
+        r"(?i)\b(lat(?:itude)?|lon(?:gitude)?|lng)\s*[:=]\s*[+-]?\d{1,3}\.\d+",
+        r"\1=<COORD>",
+        text,
+    )
+    text = re.sub(
+        r"[+-]?\d{1,2}\.\d{3,}\s*,\s*[+-]?\d{1,3}\.\d{3,}",
+        "<COORDS>",
+        text,
+    )
     text = re.sub(r"\s+", " ", text).strip()
     return text[:260]
 

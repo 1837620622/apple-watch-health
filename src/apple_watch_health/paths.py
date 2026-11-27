@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 APP_NAME = "apple-watch-health"
@@ -44,6 +45,31 @@ def identity_dir() -> Path:
 
 def pid_file() -> Path:
     return data_dir() / "sender.pid"
+
+
+def sender_stop_file() -> Path:
+    return data_dir() / "sender.stop"
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Atomically write UTF-8 text to *path* with Windows rename-lock retries."""
+    ensure_private_dir(path.parent)
+    if path.is_symlink():
+        raise OSError(f"拒绝写入符号链接文件: {path}")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if os.name != "nt" or attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def legacy_identity_dirs() -> list[Path]:
@@ -108,26 +134,37 @@ def _windows_current_sid() -> str | None:
     return None
 
 
-def restrict_permissions(path: Path, is_dir: bool) -> None:
+def restrict_permissions(path: Path, is_dir: bool, *, strict: bool = False) -> bool:
     """Restrict file or directory access strictly to the current OS user."""
     if os.name == "nt":
         sid = _windows_current_sid()
         principal = f"*{sid}" if sid else os.environ.get("USERNAME", "")
         if not principal:
-            return
+            if strict:
+                raise PermissionError("无法确定当前 Windows 用户 SID，拒绝以默认权限保存凭据")
+            return False
         perm = "(OI)(CI)F" if is_dir else "F"
-        subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:{perm}"],
-            capture_output=True,
-            check=False,
-            timeout=15,
-        )
-    else:
-        os.chmod(path, 0o700 if is_dir else 0o600)
+        try:
+            proc = subprocess.run(
+                ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:{perm}"],
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+            ok = proc.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if not ok and strict:
+            raise PermissionError(f"无法为 {path} 设置仅当前用户访问的 Windows ACL")
+        return ok
+    os.chmod(path, 0o700 if is_dir else 0o600)
+    return True
 
 
 def ensure_private_dir(path: Path) -> Path:
     """Create directory with owner-only permissions if absent."""
+    if path.is_symlink():
+        raise OSError(f"拒绝使用符号链接作为私有目录: {path}")
     path.mkdir(parents=True, exist_ok=True)
     restrict_permissions(path, is_dir=True)
     return path

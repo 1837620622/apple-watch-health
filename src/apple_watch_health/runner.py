@@ -7,6 +7,7 @@ import json
 import math
 import os
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -16,7 +17,12 @@ from pymobiledevice3.lockdown import create_using_usbmux
 
 from .auth import AuthenticationProvider
 from .link import Link
-from .paths import ensure_private_dir, pid_file, sandbox_profile_path
+from .paths import (
+    atomic_write_text,
+    pid_file,
+    sandbox_profile_path,
+    sender_stop_file,
+)
 from .profile import build_identity_message, build_location_message, build_location_sentences
 from .wire import decode_parameters
 
@@ -47,13 +53,25 @@ def is_pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes
 
         PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        STILL_ACTIVE = 259
+        ERROR_ACCESS_DENIED = 5
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not handle:
-            return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
+            # Access denied still means the process exists (e.g. an elevated process).
+            return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+        try:
+            # OpenProcess also succeeds for an exited process whose handle is still referenced
+            # elsewhere, so a stale PID file used to look "alive" forever on Windows.
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -79,23 +97,78 @@ def read_active_sender() -> dict[str, object] | None:
     return None
 
 
+def _sender_stop_targets_pid(pid: int) -> bool:
+    sf = sender_stop_file()
+    if not sf.exists():
+        return False
+    try:
+        content = sf.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return True
+    if not content or content == "*":
+        return True
+    if content.isdigit():
+        return int(content) == pid
+    return True
+
+
+def _clear_sender_stop(pid: int) -> None:
+    if _sender_stop_targets_pid(pid):
+        sender_stop_file().unlink(missing_ok=True)
+
+
 def stop_active_sender(wait_seconds: float = 4.0) -> tuple[bool, str]:
     info = read_active_sender()
     if info is None:
         return False, "当前没有运行中的定位发送进程。"
     pid = int(info["pid"])
+
+    # Ask the sender to shut down gracefully first so USB & MFi child helper close cleanly
+    # (on Windows os.kill(pid, SIGTERM) terminates immediately without running finally blocks).
     try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as exc:
-        pid_file().unlink(missing_ok=True)
-        return False, f"停止进程 {pid} 失败: {exc}"
+        atomic_write_text(sender_stop_file(), str(pid))
+    except OSError:
+        pass
+    if os.name != "nt":
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pid_file().unlink(missing_ok=True)
+            sender_stop_file().unlink(missing_ok=True)
+            return True, f"定位发送进程 (PID {pid}) 已结束。"
+        except OSError as exc:
+            pid_file().unlink(missing_ok=True)
+            sender_stop_file().unlink(missing_ok=True)
+            return False, f"停止进程 {pid} 失败: {exc}"
 
     deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         if not is_pid_alive(pid):
             pid_file().unlink(missing_ok=True)
+            sender_stop_file().unlink(missing_ok=True)
             return True, f"已停止定位发送进程 (PID {pid})。"
         time.sleep(0.15)
+
+    # Graceful timeout: terminate process tree so the isolated MFi helper subprocess never leaks.
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    for _ in range(15):
+        if not is_pid_alive(pid):
+            pid_file().unlink(missing_ok=True)
+            sender_stop_file().unlink(missing_ok=True)
+            return True, f"已强制停止定位发送进程及其子进程 (PID {pid})。"
+        time.sleep(0.1)
     return False, f"已发送停止信号给 PID {pid}，但进程仍在退出中，请稍后复核。"
 
 
@@ -106,7 +179,6 @@ def _acquire_pid_lock(config: RunConfig) -> Path:
             f"已有另一个发送会话在运行 (PID {existing['pid']})，请先执行 `awh stop` 停止它。"
         )
     pf = pid_file()
-    ensure_private_dir(pf.parent)
     meta = {
         "pid": os.getpid(),
         "command": config.command,
@@ -114,7 +186,7 @@ def _acquire_pid_lock(config: RunConfig) -> Path:
         "longitude": config.longitude,
         "started_at": int(time.time()),
     }
-    pf.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    atomic_write_text(pf, json.dumps(meta, ensure_ascii=False))
     return pf
 
 
@@ -166,6 +238,7 @@ async def run_session(config: RunConfig) -> dict[str, object]:
     def _request_stop() -> None:
         stop_event.set()
 
+    previous_handlers: dict[int, object] = {}
     if os.name != "nt":
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -174,14 +247,28 @@ async def run_session(config: RunConfig) -> dict[str, object]:
             except (NotImplementedError, RuntimeError):
                 pass
     else:
-        for sig in (signal.SIGINT, signal.SIGTERM):
+        for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
+            if sig is None:
+                continue
             try:
-                signal.signal(sig, lambda *_a: loop.call_soon_threadsafe(_request_stop))
+                previous_handlers[sig] = signal.signal(
+                    sig, lambda *_a: loop.call_soon_threadsafe(_request_stop)
+                )
             except (ValueError, OSError):
                 pass
 
+    pid = os.getpid()
     if config.command == "send":
+        _clear_sender_stop(pid)
         lock_path = _acquire_pid_lock(config)
+
+    def _should_stop() -> bool:
+        if stop_event.is_set():
+            return True
+        if config.command == "send" and _sender_stop_targets_pid(pid):
+            stop_event.set()
+            return True
+        return False
 
     deadline = loop.time() + config.duration
     identified = False
@@ -190,7 +277,7 @@ async def run_session(config: RunConfig) -> dict[str, object]:
     reconnect_count = 0
 
     try:
-        while not stop_event.is_set() and loop.time() < deadline:
+        while not _should_stop() and loop.time() < deadline:
             phone = None
             link = None
             will_reconnect = False
@@ -216,7 +303,7 @@ async def run_session(config: RunConfig) -> dict[str, object]:
                 identified = False
                 authenticated = False
 
-                while not stop_event.is_set() and (remaining := deadline - loop.time()) > 0:
+                while not _should_stop() and (remaining := deadline - loop.time()) > 0:
                     try:
                         message = await link.receive(min(0.25, remaining))
                     except TimeoutError:
@@ -342,13 +429,13 @@ async def run_session(config: RunConfig) -> dict[str, object]:
                             if not will_reconnect:
                                 raise
 
-            if not stop_event.is_set() and loop.time() < deadline:
-                try:
-                    await asyncio.wait_for(
-                        stop_event.wait(), timeout=min(2.0, max(0.1, deadline - loop.time()))
-                    )
-                except TimeoutError:
-                    pass
+            if not _should_stop() and loop.time() < deadline:
+                wait_until = min(deadline, loop.time() + 2.0)
+                while not _should_stop() and (rem := wait_until - loop.time()) > 0:
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=min(0.25, rem))
+                    except TimeoutError:
+                        pass
 
         summary: dict[str, object] = {
             "event": "finished",
@@ -367,7 +454,16 @@ async def run_session(config: RunConfig) -> dict[str, object]:
                 loop.remove_signal_handler(sig)
             except (NotImplementedError, RuntimeError):
                 pass
+        # Restore Windows handlers so a later asyncio.run in the same process is not left with
+        # a lambda bound to this (now closed) loop.
+        for sig, handler in previous_handlers.items():
+            try:
+                signal.signal(sig, handler)  # type: ignore[arg-type]
+            except (ValueError, OSError, TypeError):
+                pass
         try:
             await auth.close()
         finally:
+            if config.command == "send":
+                _clear_sender_stop(pid)
             _release_pid_lock(lock_path)
