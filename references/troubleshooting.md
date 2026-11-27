@@ -82,4 +82,6 @@ finished                   会话结束并释放锁与资源
 | `awh.cmd` 中文乱码 / 参数里的 `!` 消失 | 批处理为 LF 换行且开启了延迟变量扩展 | 2.3.0 已改为 CRLF 并移除 `enabledelayedexpansion`（`.gitattributes` 保证 git 检出不再变回 LF） |
 | 中国大陆定位偏差 300–600 米 | 高德/腾讯/微信用 GCJ-02，百度用 BD-09，而 iPhone 底层只认 WGS-84 | 从高德/腾讯/微信复制的坐标加 `--coord-type gcj02`，百度加 `--coord-type bd09` 自动精准纠偏 |
 | Windows 首次 `locate` 报 `InvalidServiceError` | 手机未挂载 Developer Disk Image (DDI) 且旧 RSD 缓存无 `dtservicehub` | 2.3.0 会自动联网挂载 DDI 后重建隧道刷新服务表；确保已开开发者模式、屏幕解锁且电脑能访问 GitHub/Apple |
-| Windows `awh stop` 后仍有残留 `python` 子进程 | Windows 上 `os.kill(SIGTERM)` 直接强杀跳过清理 | 2.3.0 改为停止文件优雅关闭 + 超时 `taskkill /T /F` 整树清理，彻底避免 MFi 助手残留 |
+| Windows `awh stop` 后仍有残留 `python` 子进程 | Windows 上 `os.kill(SIGTERM)` 直接强杀跳过清理 | 2.3.0+ 改为停止文件优雅关闭 + 超时 `taskkill /T /F` 整树清理，彻底避免 MFi 助手残留 |
+| `awh monitor` 跑一两秒就自动退出 | 旧版 `wait_for(__anext__)` 超时会取消并终结异步生成器 | 2.4.0 已改为外层 `asyncio.timeout` 并在退出时规范关闭 `OsTraceService` 与 `lockdown` |
+| 从高德/百度复制的坐标提示纬度超范围 | 国内地图拾取器默认输出「经度,纬度」（如 `116.3974,39.9092`） | 2.4.0 已在 `--place` 中自动识别 `经度,纬度` 并翻转，搭配 `--coord-type gcj02`（高德/微信）或 `bd09`（百度）即可零偏移定位 |

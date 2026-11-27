@@ -296,15 +296,22 @@ async def discover_usb_devices(*, include_network: bool = False) -> list[DeviceS
     """Discover connected iOS devices using async pymobiledevice3 v9+ APIs."""
     mux_devices = await _maybe_await(list_devices())
     seen_usb: set[str] = set()
-    targets = []
+    targets: list[tuple[str, str]] = []
+    # Two-pass dedup so a Network entry ordered before USB never causes duplicate summaries.
     for dev in mux_devices:
         conn = getattr(dev, "connection_type", "")
         serial = getattr(dev, "serial", "")
-        if conn == "USB":
+        if conn == "USB" and serial not in seen_usb:
             seen_usb.add(serial)
             targets.append((serial, conn))
-        elif include_network and serial not in seen_usb:
-            targets.append((serial, conn))
+    if include_network:
+        seen_net: set[str] = set()
+        for dev in mux_devices:
+            conn = getattr(dev, "connection_type", "")
+            serial = getattr(dev, "serial", "")
+            if conn != "USB" and serial not in seen_usb and serial not in seen_net:
+                seen_net.add(serial)
+                targets.append((serial, conn))
 
     summaries: list[DeviceSummary] = []
     for serial, conn in targets:
@@ -395,30 +402,39 @@ async def stream_region_diagnostics(
     client = await _maybe_await(
         create_using_usbmux(serial=serial, connection_type="USB", autopair=False)
     )
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + duration
+    trace = OsTraceService(lockdown=client)
+    stream = None
     try:
-        trace = OsTraceService(lockdown=client)
         stream = trace.syslog()
-        while (remaining := deadline - loop.time()) > 0:
-            try:
-                entry = await asyncio.wait_for(stream.__anext__(), timeout=min(1.0, remaining))
-            except TimeoutError:
-                continue
-            except StopAsyncIteration:
-                break
-            image = str(getattr(entry, "image_name", "") or "")
-            message = str(getattr(entry, "message", "") or "")
-            if "shouldNotDoWork" in message:
-                continue
-            if not MONITOR_PATTERNS.search(message):
-                continue
-            yield {
-                "process": os.path.basename(image) or "unknown",
-                "level": str(getattr(getattr(entry, "level", None), "name", "INFO")),
-                "message": sanitize_log_message(message),
-            }
+        # Use asyncio.timeout across the full stream instead of wait_for(__anext__):
+        # cancelling a single __anext__() permanently closes a Python async generator.
+        try:
+            async with asyncio.timeout(duration):
+                async for entry in stream:
+                    image = str(getattr(entry, "image_name", "") or "")
+                    message = str(getattr(entry, "message", "") or "")
+                    if "shouldNotDoWork" in message:
+                        continue
+                    if not MONITOR_PATTERNS.search(message):
+                        continue
+                    yield {
+                        "process": os.path.basename(image) or "unknown",
+                        "level": str(getattr(getattr(entry, "level", None), "name", "INFO")),
+                        "message": sanitize_log_message(message),
+                    }
+        except TimeoutError:
+            pass
     finally:
+        if stream is not None and hasattr(stream, "aclose"):
+            try:
+                await stream.aclose()
+            except Exception:
+                pass
+        if hasattr(trace, "close"):
+            try:
+                await _maybe_await(trace.close())
+            except Exception:
+                pass
         try:
             await _maybe_await(client.close())
         except Exception:

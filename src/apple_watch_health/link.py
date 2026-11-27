@@ -40,7 +40,14 @@ class Link:
     async def read(self, timeout: float) -> Packet:
         if self._reader_task is None:
             self._reader_task = asyncio.create_task(self._read_packet())
-        packet = await asyncio.wait_for(asyncio.shield(self._reader_task), timeout)
+        try:
+            packet = await asyncio.wait_for(asyncio.shield(self._reader_task), timeout)
+        except TimeoutError:
+            raise
+        except BaseException:
+            # Clear failed/cancelled task so subsequent reads do not re-await a dead task.
+            self._reader_task = None
+            raise
         self._reader_task = None
         return packet
 
@@ -62,7 +69,7 @@ class Link:
                 raise ProtocolError("Invalid iAP2 handshake parameters")
             version, window, size, retry, _, _, _ = struct.unpack(">BBHHHBB", response.payload[:10])
             sessions = response.payload[10:]
-            if version != 1 or window < 1 or size < 10 or len(sessions) % 3 != 0:
+            if version != 1 or window < 1 or size < 16 or len(sessions) % 3 != 0:
                 raise ProtocolError("Unsupported iAP2 link parameters")
             triplets = [sessions[i : i + 3] for i in range(0, len(sessions), 3)]
             if bytes([1, 0, 2]) not in triplets:

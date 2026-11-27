@@ -6,6 +6,7 @@ import argparse
 import math
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from . import __version__, aio
@@ -22,6 +23,7 @@ from .dvt import (
     active_dvt_holder,
     dvt_clear_location,
     dvt_hold_location,
+    dvt_play_gpx,
     read_dvt_state,
     spawn_detached_holder,
     wait_for_holder,
@@ -44,7 +46,7 @@ from .paths import (
     project_root,
     resolve_identity_files,
 )
-from .profile import PRESETS, convert_to_wgs84, resolve_place
+from .profile import PRESETS, convert_to_wgs84, load_gpx_route, resolve_place
 from .runner import (
     RunConfig,
     emit,
@@ -316,7 +318,9 @@ def _cmd_probe_or_send(args: argparse.Namespace, raw_argv: list[str]) -> int:
         emit(event="interrupted")
         return 0
     except Exception as err:
-        emit(event="error", type=type(err).__name__, detail=str(err))
+        hint = _hint_for(err)
+        emit(event="error", type=type(err).__name__, detail=str(err), hint=hint)
+        print(f"提示: {hint}", file=sys.stderr)
         return 1
 
     if args.command == "probe":
@@ -353,20 +357,80 @@ def _cmd_stop(_args: argparse.Namespace) -> int:
     return 0 if stopped else 1
 
 
+def _cmd_status(_args: argparse.Namespace) -> int:
+    """Display active DVT/iAP2 simulation sessions and local MFi readiness without probing USB."""
+    now = int(time.time())
+    print(f"apple-watch-health v{__version__} | 平台: {platform_summary()} | 缓存目录: {data_dir()}")
+
+    holder = active_dvt_holder()
+    if holder:
+        elapsed = max(0, now - int(holder.get("started_at") or now))
+        mode = holder.get("mode", "static")
+        extra = ""
+        if mode == "gpx":
+            extra = f" | 轨迹进度 {holder.get('point_index', 0)}/{holder.get('total_points', 0)}"
+        elif holder.get("jitter_m"):
+            extra = f" | 漂移 ±{holder.get('jitter_m')}m"
+        print(
+            f"[RUN] DVT 定位保持中: PID={holder.get('pid')} | {holder.get('device', 'iPhone')} | "
+            f"{holder.get('label', '')} ({float(holder.get('latitude') or 0):.5f}, "
+            f"{float(holder.get('longitude') or 0):.5f}) | 已运行 {elapsed}s{extra}"
+        )
+    else:
+        print("[IDLE] DVT 定位保持: 未运行")
+
+    sender = read_active_sender()
+    if sender:
+        elapsed = max(0, now - int(sender.get("started_at") or now))
+        print(
+            f"[RUN] iAP2 发送器运行中: PID={sender.get('pid')} | "
+            f"({sender.get('latitude')}, {sender.get('longitude')}) | 已运行 {elapsed}s"
+        )
+    else:
+        print("[IDLE] iAP2 发送器: 未运行")
+
+    pair = resolve_identity_files()
+    print(f"[{'OK' if pair else 'MISS'}] MFi 身份: {pair[0] if pair else '未配置（运行 awh setup 提取）'}")
+    return 0
+
+
 def _cmd_locate(args: argparse.Namespace, raw_argv: list[str]) -> int:
     """Dual-engine global locator: `dvt` (all apps incl. WeChat/Maps w/ Wi-Fi) or `iap2` (Health)."""
     if args.engine == "iap2":
+        if args.gpx:
+            print("错误: --gpx 轨迹回放仅支持默认 DVT 引擎（请去掉 --engine iap2）", file=sys.stderr)
+            return 2
         return _cmd_probe_or_send(args, raw_argv)
 
-    try:
-        lat, lon, _alt, label = _resolve_coords(args)
-    except ValueError as err:
-        print(f"错误: {err}", file=sys.stderr)
+    if not math.isfinite(args.jitter) or not 0.0 <= args.jitter <= 500.0:
+        print("错误: --jitter 必须在 0..500 米之间", file=sys.stderr)
         return 2
-
+    if not math.isfinite(args.speed) or not 0.05 <= args.speed <= 100.0:
+        print("错误: --speed 必须在 0.05..100 倍之间", file=sys.stderr)
+        return 2
     if not math.isfinite(args.hold) or args.hold < 0 or args.hold > 86400:
         print("错误: --hold 必须在 0..86400 秒之间（0 = 一直保持直到 Ctrl+C 或 awh restore）", file=sys.stderr)
         return 2
+
+    gpx_points = None
+    lat = 0.0
+    lon = 0.0
+    label = ""
+    if args.gpx:
+        try:
+            gpx_path = Path(args.gpx).expanduser().resolve()
+            gpx_points = load_gpx_route(gpx_path, coord_type=args.coord_type)
+            label = args.label or f"GPX: {gpx_path.name} ({len(gpx_points)} 点)"
+            lat, lon = gpx_points[0].latitude, gpx_points[0].longitude
+        except (OSError, ValueError) as err:
+            print(f"错误: {err}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            lat, lon, _alt, label = _resolve_coords(args)
+        except ValueError as err:
+            print(f"错误: {err}", file=sys.stderr)
+            return 2
 
     holder = active_dvt_holder()
     if holder and not args.holder_process:
@@ -378,12 +442,23 @@ def _cmd_locate(args: argparse.Namespace, raw_argv: list[str]) -> int:
         child_argv = [
             "locate",
             "--engine=dvt",
-            f"--lat={lat:.7f}",
-            f"--lon={lon:.7f}",
             f"--hold={args.hold}",
+            f"--jitter={args.jitter}",
             f"--label={label}",
             "--holder-process",
         ]
+        if args.gpx:
+            child_argv.extend(
+                [
+                    f"--gpx={Path(args.gpx).expanduser().resolve()}",
+                    f"--coord-type={args.coord_type}",
+                    f"--speed={args.speed}",
+                ]
+            )
+            if args.loop:
+                child_argv.append("--loop")
+        else:
+            child_argv.extend([f"--lat={lat:.7f}", f"--lon={lon:.7f}"])
         if args.udid:
             child_argv.append(f"--udid={args.udid}")
         proc, log_path = spawn_detached_holder(child_argv)
@@ -394,13 +469,24 @@ def _cmd_locate(args: argparse.Namespace, raw_argv: list[str]) -> int:
             return 1
         print(
             f"[OK] 已将 {info} 全局定位至 {label} ({lat:.4f}, {lon:.4f})，后台持续保持中。\n"
-            "     可关闭此窗口；保持 USB 连接。用完执行 `awh restore` 即可恢复真实 GPS。"
+            "     可关闭此窗口；保持 USB 连接。用 `awh status` 查看进度，`awh restore` 恢复真实 GPS。"
         )
         return 0
 
     if not args.holder_process:
-        until = f"{args.hold:.0f} 秒后自动恢复" if args.hold > 0 else "按 Ctrl+C 或另开终端执行 awh restore 恢复"
-        print(f"==> 正在通过官方 DVT 通道定位到 {label} ({lat:.4f}, {lon:.4f})，{until}...", flush=True)
+        if gpx_points is not None:
+            loop_txt = "（循环播放）" if args.loop else ""
+            print(
+                f"==> 正在通过官方 DVT 通道回放 GPX 轨迹 {label}，倍速 {args.speed}x{loop_txt}...",
+                flush=True,
+            )
+        else:
+            until = f"{args.hold:.0f} 秒后自动恢复" if args.hold > 0 else "按 Ctrl+C 或另开终端执行 awh restore 恢复"
+            jitter_txt = f"，微幅漂移 ±{args.jitter:.0f}m" if args.jitter > 0 else ""
+            print(
+                f"==> 正在通过官方 DVT 通道定位到 {label} ({lat:.4f}, {lon:.4f}){jitter_txt}，{until}...",
+                flush=True,
+            )
 
     def _on_event(**ev: object) -> None:
         emit(**ev)
@@ -414,12 +500,30 @@ def _cmd_locate(args: argparse.Namespace, raw_argv: list[str]) -> int:
             )
 
     try:
-        state = aio.run(
-            dvt_hold_location(
-                lat, lon, label=args.label or label, serial=args.udid,
-                hold_seconds=args.hold, on_event=_on_event,
+        if gpx_points is not None:
+            state = aio.run(
+                dvt_play_gpx(
+                    gpx_points,
+                    label=args.label or label,
+                    serial=args.udid,
+                    speed=args.speed,
+                    loop_route=args.loop,
+                    jitter_m=args.jitter,
+                    on_event=_on_event,
+                )
             )
-        )
+        else:
+            state = aio.run(
+                dvt_hold_location(
+                    lat,
+                    lon,
+                    label=args.label or label,
+                    serial=args.udid,
+                    hold_seconds=args.hold,
+                    jitter_m=args.jitter,
+                    on_event=_on_event,
+                )
+            )
     except KeyboardInterrupt:
         emit(event="interrupted", engine="dvt")
         print("[OK] 已中断并恢复真实定位。")
@@ -660,12 +764,22 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument(
                 "--detach",
                 action="store_true",
-                help="DVT 在后台进程中保持定位，命令立即返回，可关闭终端；用 awh restore 结束",
+                help="DVT 在后台进程中保持定位/回放轨迹，命令立即返回，可关闭终端；用 awh restore 结束",
             )
+            p.add_argument(
+                "--jitter",
+                type=float,
+                default=0.0,
+                help="自然 GPS 随机微幅漂移半径（米，0..500，默认 0=精确静止；建议 3..8 模拟真实户外信号）",
+            )
+            p.add_argument("--gpx", help="导入 GPX 轨迹文件按路线模拟移动（兼容爱思助手/标准 GPX 1.0/1.1）")
+            p.add_argument("--speed", type=float, default=1.0, help="GPX 轨迹回放倍速（0.05..100，默认 1.0）")
+            p.add_argument("--loop", action="store_true", help="循环回放 GPX 轨迹直到手动 restore/Ctrl+C")
             p.add_argument("--label", default="", help=argparse.SUPPRESS)
             p.add_argument("--holder-process", action="store_true", help=argparse.SUPPRESS)
             p.add_argument("--debug", action="store_true", help="失败时打印完整堆栈")
 
+    sub.add_parser("status", help="快速查看当前 DVT 定位保持 / GPX 轨迹 / iAP2 发送器与 MFi 状态")
     p_dm = sub.add_parser("devmode", help="查看/显示/开启 iPhone 开发者模式（DVT 定位必需，Windows 首次使用必看）")
     p_dm.add_argument("--udid", help="指定目标 iPhone UDID")
     g = p_dm.add_mutually_exclusive_group()
@@ -705,6 +819,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dispatch = {
         "doctor": _cmd_doctor,
+        "status": _cmd_status,
         "devices": _cmd_devices,
         "setup": _cmd_setup,
         "features": _cmd_features,

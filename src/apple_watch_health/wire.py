@@ -30,6 +30,8 @@ class Packet:
 
     def encode(self) -> bytes:
         total_size = 9 + len(self.payload) + (1 if self.payload else 0)
+        if total_size > 0xFFFF:
+            raise ProtocolError(f"iAP2 link packet exceeds 65535 bytes: {total_size}")
         header = struct.pack(
             ">2sHBBBB",
             LINK_MARKER,
@@ -64,7 +66,10 @@ class Packet:
 
 def encode_parameter(identifier: int, data: bytes = b"") -> bytes:
     """Encode an iAP2 TLV parameter: 2B length (inclusive) + 2B ID + data."""
-    return struct.pack(">HH", len(data) + 4, identifier) + data
+    total = len(data) + 4
+    if total > 0xFFFF or not 0 <= identifier <= 0xFFFF:
+        raise ProtocolError(f"iAP2 parameter overflow: id={identifier}, size={total}")
+    return struct.pack(">HH", total, identifier) + data
 
 
 def decode_parameters(raw: bytes) -> list[tuple[int, bytes]]:
@@ -98,7 +103,10 @@ class Message:
     body: bytes = b""
 
     def encode(self) -> bytes:
-        return struct.pack(">2sHH", CONTROL_MARKER, len(self.body) + 6, self.identifier) + self.body
+        total = len(self.body) + 6
+        if total > 0xFFFF or not 0 <= self.identifier <= 0xFFFF:
+            raise ProtocolError(f"iAP2 control message overflow: id={self.identifier}, size={total}")
+        return struct.pack(">2sHH", CONTROL_MARKER, total, self.identifier) + self.body
 
 
 class MessageBuffer:

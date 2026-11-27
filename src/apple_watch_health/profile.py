@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
 import struct
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from .wire import Message, encode_parameter, encode_text_parameter
 
@@ -142,12 +144,49 @@ PLACE_ALIASES: dict[str, tuple[str, float, float, float]] = {
     "多伦多": ("加拿大 · 多伦多", 43.6532, -79.3832, 76.0),
     "迪拜": ("阿联酋 · 迪拜", 25.2048, 55.2708, 10.0),
     "曼谷": ("泰国 · 曼谷", 13.7563, 100.5018, 5.0),
-    "北京": ("中国 · 北京", 39.9042, 116.4074, 45.0),
-    "上海": ("中国 · 上海", 31.2304, 121.4737, 10.0),
-    "深圳": ("中国 · 深圳", 22.5431, 114.0579, 18.0),
-    "广州": ("中国 · 广州", 23.1291, 113.2644, 15.0),
-    "杭州": ("中国 · 杭州", 30.2741, 120.1551, 12.0),
-    "成都": ("中国 · 成都", 30.5728, 104.0668, 500.0),
+    "北京": ("中国 · 北京天安门", 39.9087, 116.3975, 45.0),
+    "beijing": ("Beijing", 39.9087, 116.3975, 45.0),
+    "上海": ("中国 · 上海外滩", 31.2397, 121.4998, 10.0),
+    "shanghai": ("Shanghai", 31.2397, 121.4998, 10.0),
+    "深圳": ("中国 · 深圳福田", 22.5431, 114.0579, 18.0),
+    "shenzhen": ("Shenzhen", 22.5431, 114.0579, 18.0),
+    "广州": ("中国 · 广州珠江新城", 23.1291, 113.2644, 15.0),
+    "guangzhou": ("Guangzhou", 23.1291, 113.2644, 15.0),
+    "杭州": ("中国 · 杭州西湖", 30.2590, 120.1486, 12.0),
+    "hangzhou": ("Hangzhou", 30.2590, 120.1486, 12.0),
+    "成都": ("中国 · 成都春熙路", 30.6570, 104.0815, 500.0),
+    "chengdu": ("Chengdu", 30.6570, 104.0815, 500.0),
+    "重庆": ("中国 · 重庆解放碑", 29.5572, 106.5770, 260.0),
+    "南京": ("中国 · 南京新街口", 32.0418, 118.7841, 20.0),
+    "武汉": ("中国 · 武汉江汉路", 30.5810, 114.2916, 25.0),
+    "西安": ("中国 · 西安钟楼", 34.2594, 108.9470, 410.0),
+    "天津": ("中国 · 天津之眼", 39.1536, 117.1867, 8.0),
+    "苏州": ("中国 · 苏州金鸡湖", 31.3167, 120.7069, 6.0),
+    "长沙": ("中国 · 长沙五一广场", 28.1941, 112.9762, 50.0),
+    "郑州": ("中国 · 郑州二七广场", 34.7525, 113.6660, 110.0),
+    "青岛": ("中国 · 青岛五四广场", 36.0638, 120.3826, 15.0),
+    "厦门": ("中国 · 厦门鼓浪屿", 24.4478, 118.0672, 10.0),
+    "大连": ("中国 · 大连星海广场", 38.8825, 121.5892, 15.0),
+    "昆明": ("中国 · 昆明滇池", 24.9746, 102.6606, 1890.0),
+    "哈尔滨": ("中国 · 哈尔滨中央大街", 45.7732, 126.6203, 130.0),
+    "沈阳": ("中国 · 沈阳中街", 41.8016, 123.4614, 55.0),
+    "合肥": ("中国 · 合肥天鹅湖", 31.8195, 117.2202, 35.0),
+    "福州": ("中国 · 福州三坊七巷", 26.0825, 119.2965, 15.0),
+    "济南": ("中国 · 济南趵突泉", 36.6612, 117.0156, 35.0),
+    "珠海": ("中国 · 珠海情侣路", 22.2707, 113.5767, 10.0),
+    "三亚": ("中国 · 三亚亚龙湾", 18.2036, 109.6393, 8.0),
+    "拉萨": ("中国 · 拉萨布达拉宫", 29.6555, 91.1186, 3650.0),
+    "芝加哥": ("美国 · 芝加哥", 41.8781, -87.6298, 180.0),
+    "波士顿": ("美国 · 波士顿", 42.3601, -71.0589, 14.0),
+    "硅谷": ("美国 · 硅谷帕洛阿尔托", 37.4419, -122.1430, 15.0),
+    "墨尔本": ("澳大利亚 · 墨尔本", -37.8136, 144.9631, 31.0),
+    "吉隆坡": ("马来西亚 · 吉隆坡双子塔", 3.1579, 101.7116, 66.0),
+    "釜山": ("韩国 · 釜山海云台", 35.1587, 129.1604, 12.0),
+    "京都": ("日本 · 京都清水寺", 34.9949, 135.7850, 90.0),
+    "苏黎世": ("瑞士 · 苏黎世", 47.3769, 8.5417, 408.0),
+    "罗马": ("意大利 · 罗马斗兽场", 41.8902, 12.4922, 22.0),
+    "阿姆斯特丹": ("荷兰 · 阿姆斯特丹", 52.3676, 4.9041, 2.0),
+    "莫斯科": ("俄罗斯 · 莫斯科红场", 55.7539, 37.6208, 156.0),
 }
 
 _COORD_PAIR_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*[,，\s]\s*([+-]?\d+(?:\.\d+)?)\s*$")
@@ -273,10 +312,17 @@ def resolve_place(query: str, *, allow_online: bool = True) -> tuple[float, floa
 
     match = _COORD_PAIR_RE.match(raw)
     if match:
-        lat, lon = float(match.group(1)), float(match.group(2))
+        first, second = float(match.group(1)), float(match.group(2))
+        # Auto-detect AMap/Baidu picker `lon,lat` order (e.g. `116.3974,39.9092`) when |first| > 90.
+        if abs(first) > 90.0 and abs(first) <= 180.0 and abs(second) <= 90.0:
+            lat, lon = second, first
+            note = " [自动识别经度,纬度]"
+        else:
+            lat, lon = first, second
+            note = ""
         format_nmea_coordinate(lat, is_latitude=True)
         format_nmea_coordinate(lon, is_latitude=False)
-        return lat, lon, 15.0, f"坐标 ({lat:.4f}, {lon:.4f})"
+        return lat, lon, 15.0, f"坐标 ({lat:.4f}, {lon:.4f}){note}"
 
     if lower in PLACE_ALIASES:
         label, lat, lon, alt = PLACE_ALIASES[lower]
@@ -318,6 +364,90 @@ def resolve_place(query: str, *, allow_online: bool = True) -> tuple[float, floa
     format_nmea_coordinate(lon, is_latitude=False)
     label = str(top.get("display_name", raw))[:80]
     return lat, lon, 15.0, label
+
+
+# --------------------------------------------------------------------------------------------
+# Natural GPS jitter & GPX route loader (matching i4Tools route/anti-static capabilities)
+# --------------------------------------------------------------------------------------------
+
+_MAX_GPX_BYTES = 10 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class RoutePoint:
+    latitude: float
+    longitude: float
+    delay_seconds: float | None = None
+
+
+def apply_gps_jitter(latitude: float, longitude: float, radius_m: float) -> tuple[float, float]:
+    """Apply realistic random GPS drift within *radius_m* meters around (latitude, longitude)."""
+    if not math.isfinite(radius_m) or radius_m <= 0:
+        return latitude, longitude
+    # Uniform sampling inside disk of radius_m.
+    dist = radius_m * math.sqrt(random.random())
+    bearing = random.uniform(0.0, 2.0 * math.pi)
+    d_lat = (dist * math.cos(bearing)) / 111_320.0
+    cos_lat = max(0.05, math.cos(math.radians(latitude)))
+    d_lon = (dist * math.sin(bearing)) / (111_320.0 * cos_lat)
+    j_lat = max(-89.9999, min(89.9999, latitude + d_lat))
+    j_lon = ((longitude + d_lon + 180.0) % 360.0) - 180.0
+    return j_lat, j_lon
+
+
+def _parse_iso_timestamp(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    cleaned = text.strip().replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+
+
+def load_gpx_route(path: Path, *, coord_type: str = "wgs84") -> list[RoutePoint]:
+    """Safely parse GPX 1.0/1.1 `<trkpt>`/`<rtept>`/`<wpt>` points using defusedxml (XXE-safe)."""
+    from defusedxml import ElementTree as DefusedET
+
+    expanded = path.expanduser()
+    with expanded.open("rb") as fh:
+        raw = fh.read(_MAX_GPX_BYTES + 1)
+    if not raw or len(raw) > _MAX_GPX_BYTES:
+        raise ValueError(f"GPX 文件大小必须在 1..{_MAX_GPX_BYTES} 字节之间")
+
+    try:
+        root = DefusedET.fromstring(raw)
+    except Exception as exc:
+        raise ValueError(f"GPX XML 解析失败: {exc}") from exc
+
+    def _local(tag: str) -> str:
+        return tag.rpartition("}")[2].lower()
+
+    elements = [el for el in root.iter() if _local(el.tag) in ("trkpt", "rtept")]
+    if not elements:
+        elements = [el for el in root.iter() if _local(el.tag) == "wpt"]
+    if not elements:
+        raise ValueError("GPX 文件中未找到轨迹点（<trkpt> / <rtept> / <wpt>）")
+
+    points: list[RoutePoint] = []
+    prev_ts: datetime | None = None
+    for el in elements:
+        try:
+            lat = float(el.attrib["lat"])
+            lon = float(el.attrib["lon"])
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"GPX 轨迹点缺少有效 lat/lon 属性: {el.attrib}") from exc
+        lat, lon = convert_to_wgs84(lat, lon, coord_type)
+        ts_text = next((child.text for child in el if _local(child.tag) == "time"), None)
+        ts = _parse_iso_timestamp(ts_text)
+        delay: float | None = None
+        if prev_ts is not None and ts is not None:
+            delta = (ts - prev_ts).total_seconds()
+            if delta >= 0:
+                delay = delta
+        prev_ts = ts
+        points.append(RoutePoint(latitude=lat, longitude=lon, delay_seconds=delay))
+    return points
 
 
 def build_identity_message() -> Message:

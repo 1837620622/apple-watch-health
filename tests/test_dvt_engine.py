@@ -321,3 +321,104 @@ def test_ios16_uses_legacy_dt_simulate_location_with_auto_mount(monkeypatch) -> 
 
     aio.run(scenario())
     assert calls == ["dt_set:39.90,116.40", "auto_mount_legacy", "dt_set:39.90,116.40", "dt_clear"]
+
+
+def test_ios17_auto_mount_falls_back_to_usb_lockdown_when_rsd_mount_fails(monkeypatch) -> None:
+    events: list[str] = []
+
+    class InvalidServiceError(Exception):
+        pass
+
+    class FakeTunnel:
+        def __init__(self, serial=None) -> None:
+            self.idx = 0
+
+        async def __aenter__(self):
+            events.append("tunnel_open")
+            self.idx = events.count("tunnel_open")
+            return f"rsd-{self.idx}"
+
+        async def __aexit__(self, *a):
+            events.append(f"tunnel_close_{self.idx}")
+
+    class FakeDvtProvider:
+        def __init__(self, rsd) -> None:
+            self.rsd = rsd
+
+        async def __aenter__(self):
+            events.append(f"dvt_open_{self.rsd}")
+            if self.rsd == "rsd-1":
+                raise InvalidServiceError("missing dtservicehub")
+            return f"dvt-{self.rsd}"
+
+        async def __aexit__(self, *a):
+            events.append(f"dvt_close_{self.rsd}")
+
+    class FakeLocationSimulation:
+        def __init__(self, dvt_inst) -> None:
+            self.dvt_inst = dvt_inst
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            pass
+
+    class FakeUsbLockdown:
+        async def close(self):
+            events.append("usb_lockdown_close")
+
+    async def fake_lockdown(serial):
+        events.append("usb_lockdown_open")
+        return FakeUsbLockdown()
+
+    async def fake_auto_mount(provider) -> None:
+        if isinstance(provider, str):
+            events.append(f"rsd_mount_fail_{provider}")
+            raise RuntimeError("shim mount failed")
+        events.append("usb_mount_ok")
+
+    import pymobiledevice3.remote.userspace_tunnel as ut_mod
+    import pymobiledevice3.services.dvt.instruments.dvt_provider as dp_mod
+    import pymobiledevice3.services.dvt.instruments.location_simulation as ls_mod
+    import pymobiledevice3.services.mobile_image_mounter as mim_mod
+
+    monkeypatch.setattr(ut_mod, "UserspaceRsdTunnel", FakeTunnel)
+    monkeypatch.setattr(dp_mod, "DvtProvider", FakeDvtProvider)
+    monkeypatch.setattr(ls_mod, "LocationSimulation", FakeLocationSimulation)
+    monkeypatch.setattr(mim_mod, "auto_mount", fake_auto_mount)
+    monkeypatch.setattr(dvt, "_lockdown", fake_lockdown)
+
+    async def scenario():
+        from contextlib import AsyncExitStack
+
+        async with AsyncExitStack() as stack:
+            loc = await dvt._open_rsd_dvt_channel(stack, serial="UDID-1", ios_major=18)
+            assert loc.dvt_inst == "dvt-rsd-2"
+
+    aio.run(scenario())
+    assert "rsd_mount_fail_rsd-1" in events
+    assert "usb_lockdown_open" in events
+    assert "usb_mount_ok" in events
+    assert "usb_lockdown_close" in events
+    assert "dvt_open_rsd-2" in events
+
+
+def test_gpx_route_playback_and_jitter(monkeypatch) -> None:
+    from apple_watch_health.profile import RoutePoint
+
+    log: list[str] = []
+    _patch_channel(monkeypatch, lambda: FakeLoc(log))
+    route = [
+        RoutePoint(39.9087, 116.3975, delay_seconds=None),
+        RoutePoint(39.9100, 116.4000, delay_seconds=0.05),
+        RoutePoint(39.9120, 116.4020, delay_seconds=0.05),
+    ]
+    state = aio.run(
+        dvt.dvt_play_gpx(route, label="test.gpx", speed=2.0, loop_route=False, jitter_m=0.0)
+    )
+    assert state["points_sent"] == 3
+    assert state["cleared"] is True
+    assert log[:3] == ["set 39.91,116.40", "set 39.91,116.40", "set 39.91,116.40"]
+    assert log[-1] == "stopLocationSimulation"
+    assert dvt.read_dvt_state() is None

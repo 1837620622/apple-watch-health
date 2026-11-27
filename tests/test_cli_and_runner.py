@@ -219,3 +219,96 @@ async def test_runner_honors_graceful_sender_stop_file(monkeypatch, tmp_path) ->
     assert summary["interrupted"] is True
     assert closed == ["link", "phone", "auth"]
     assert not sender_stop_file().exists()
+
+
+def test_status_command_and_lon_lat_autodetect(capsys, tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("AWH_DATA_DIR", str(tmp_path))
+    assert main(["status"]) == 0
+    out = capsys.readouterr().out
+    assert "DVT 定位保持" in out and "iAP2 发送器" in out
+
+    # Auto-detect AMap/Baidu `lon,lat` order when |first| > 90.
+    lat, lon, _alt, label = resolve_place("116.397428, 39.90923", allow_online=False)
+    assert lat == pytest.approx(39.90923) and lon == pytest.approx(116.397428)
+    assert "经度,纬度" in label
+
+
+async def test_stream_region_diagnostics_survives_quiet_gaps_and_closes(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from apple_watch_health.device import stream_region_diagnostics
+
+    closed: list[str] = []
+
+    class FakeClient:
+        async def close(self):
+            closed.append("client")
+
+    class FakeOsTrace:
+        def __init__(self, lockdown) -> None:
+            self.lockdown = lockdown
+
+        async def syslog(self):
+            # Sleep > 0.1s then yield a matching entry; cancelling __anext__ would have aborted.
+            await asyncio.sleep(0.15)
+            yield SimpleNamespace(
+                image_name="/usr/libexec/locationd",
+                level=SimpleNamespace(name="Notice"),
+                message="GPRMC NMEA Screening passed countryCode=HK",
+            )
+            await asyncio.sleep(5.0)
+
+        async def close(self):
+            closed.append("trace")
+
+    async def fake_mux(**_kw):
+        return FakeClient()
+
+    monkeypatch.setattr("apple_watch_health.device.create_using_usbmux", fake_mux)
+    monkeypatch.setattr("apple_watch_health.device.OsTraceService", FakeOsTrace)
+
+    items = [item async for item in stream_region_diagnostics(duration=0.35)]
+    assert len(items) == 1
+    assert items[0]["process"] == "locationd"
+    assert "countryCode=HK" in items[0]["message"]
+    assert closed == ["trace", "client"]
+
+
+async def test_discover_usb_devices_dedups_network_before_usb(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from apple_watch_health.device import discover_usb_devices
+
+    fake_list = [
+        SimpleNamespace(serial="UDID-A", connection_type="Network"),
+        SimpleNamespace(serial="UDID-A", connection_type="USB"),
+    ]
+    opened: list[tuple[str, str]] = []
+
+    class FakeLockdown:
+        all_values = {"ProductType": "iPhone17,1", "ProductVersion": "27.2.1", "DeviceName": "Test"}
+
+        async def get_developer_mode_status(self):
+            return True
+
+        async def close(self):
+            pass
+
+    async def fake_list_devices():
+        return fake_list
+
+    async def fake_mux(serial=None, connection_type=None, autopair=False):
+        opened.append((serial, connection_type))
+        return FakeLockdown()
+
+    async def fake_watches(_client):
+        return (), None
+
+    monkeypatch.setattr("apple_watch_health.device.list_devices", fake_list_devices)
+    monkeypatch.setattr("apple_watch_health.device.create_using_usbmux", fake_mux)
+    monkeypatch.setattr("apple_watch_health.device._probe_paired_watches", fake_watches)
+
+    res = await discover_usb_devices(include_network=True)
+    assert len(res) == 1
+    assert opened == [("UDID-A", "USB")]

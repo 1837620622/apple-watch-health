@@ -94,3 +94,68 @@ def test_location_sentences_and_presets() -> None:
     assert loc_msg.identifier == 0xFFFB
     params = decode_parameters(loc_msg.body)
     assert len(params) == 2
+
+
+def test_wire_overflow_and_gpx_and_jitter(tmp_path) -> None:
+    from apple_watch_health.profile import apply_gps_jitter, load_gpx_route
+
+    with pytest.raises(ProtocolError):
+        encode_parameter(0, b"a" * 70000)
+    with pytest.raises(ProtocolError):
+        Message(0x1D01, b"a" * 70000).encode()
+    with pytest.raises(ProtocolError):
+        Packet(flags=ACK, sequence=1, acknowledgement=0, payload=b"a" * 70000).encode()
+
+    # Jitter radius stays within ~10m of original point.
+    j_lat, j_lon = apply_gps_jitter(39.9087, 116.3975, 10.0)
+    assert abs(j_lat - 39.9087) < 0.0002 and abs(j_lon - 116.3975) < 0.0002
+
+    # GPX parsing with GCJ-02 correction.
+    gpx = tmp_path / "walk.gpx"
+    gpx.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<gpx version="1.1"><trk><trkseg>'
+        '<trkpt lat="39.9101" lon="116.4037"><time>2026-11-27T00:00:00Z</time></trkpt>'
+        '<trkpt lat="39.9111" lon="116.4047"><time>2026-11-27T00:00:02Z</time></trkpt>'
+        "</trkseg></trk></gpx>\n",
+        encoding="utf-8",
+    )
+    pts = load_gpx_route(gpx, coord_type="gcj02")
+    assert len(pts) == 2
+    assert pts[1].delay_seconds == pytest.approx(2.0)
+    assert pts[0].latitude != pytest.approx(39.9101)  # shifted from GCJ-02 to WGS-84
+
+
+async def test_link_rejects_tiny_max_packet_and_clears_failed_reader_task() -> None:
+    import struct
+
+    from apple_watch_health.link import Link
+
+    class FakeStream:
+        def __init__(self, responses: list[bytes]) -> None:
+            self.buf = bytearray(b"".join(responses))
+            self.closed = False
+
+        async def sendall(self, data: bytes) -> None:
+            pass
+
+        async def recvall(self, n: int) -> bytes:
+            if len(self.buf) < n:
+                return b""
+            out = bytes(self.buf[:n])
+            del self.buf[:n]
+            return out
+
+        async def close(self) -> None:
+            self.closed = True
+
+    # Handshake peer offering max_packet=10 (chunk_limit would be 0) must be rejected.
+    offer = struct.pack(">BBHHHBB", 1, 1, 10, 2000, 22, 5, 1) + bytes([1, 0, 2])
+    stream = FakeStream([])
+    link = Link(stream)
+    syn_ack = Packet(SYN | ACK, 1, link.sequence, payload=offer).encode()
+    stream.buf.extend(syn_ack)
+    with pytest.raises(ProtocolError, match="Unsupported"):
+        await link.handshake()
+    assert link._reader_task is None
+    await link.close()

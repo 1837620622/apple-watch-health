@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import atomic_write_text, data_dir, ensure_private_dir
+from .profile import RoutePoint, apply_gps_jitter
 
 # Re-apply the simulated coordinate this often while holding (keeps CoreLocation fresh and
 # doubles as a liveness probe of the tunnel).
@@ -254,7 +255,12 @@ class _LegacyDtLocationChannel:
         await self._run_with_ddi("clear")
 
 
-async def _open_rsd_dvt_channel(stack: AsyncExitStack, *, serial: str | None) -> Any:
+async def _open_rsd_dvt_channel(
+    stack: AsyncExitStack,
+    *,
+    serial: str | None,
+    ios_major: int = 17,
+) -> Any:
     """Open iOS 17+ DVT LocationSimulation, auto-mounting DDI and refreshing RSD peer_info."""
     from pymobiledevice3.exceptions import AlreadyMountedError
     from pymobiledevice3.remote.userspace_tunnel import UserspaceRsdTunnel
@@ -277,11 +283,26 @@ async def _open_rsd_dvt_channel(stack: AsyncExitStack, *, serial: str | None) ->
                 await auto_mount(rsd)
             except AlreadyMountedError:
                 raise first_err from None
-            # Crucial: RSD caches `peer_info` from its initial handshake, so after mounting DDI
-            # we must close this tunnel (only one userspace tunnel per process is allowed) and
-            # establish a fresh one so `com.apple.instruments.dtservicehub` appears in `peer_info`.
-            await inner.aclose()
-            inner = AsyncExitStack()
+            except Exception:
+                # On iOS 17..26 PersonalizedDMG can also be mounted directly over USB lockdown,
+                # which is faster and avoids userspace-tunnel shim failures on Windows.
+                if ios_major >= 27:
+                    raise
+                await inner.aclose()
+                inner = AsyncExitStack()
+                usb_lockdown = await _lockdown(serial)
+                try:
+                    with suppress(AlreadyMountedError):
+                        await auto_mount(usb_lockdown)
+                finally:
+                    with suppress(Exception):
+                        await usb_lockdown.close()
+            else:
+                # Crucial: RSD caches `peer_info` from its initial handshake, so after mounting DDI
+                # we must close this tunnel (only one userspace tunnel per process is allowed) and
+                # establish a fresh one so `com.apple.instruments.dtservicehub` appears in `peer_info`.
+                await inner.aclose()
+                inner = AsyncExitStack()
             rsd = await inner.enter_async_context(UserspaceRsdTunnel(serial=serial))
             dvt = await inner.enter_async_context(DvtProvider(rsd))
             loc = await inner.enter_async_context(LocationSimulation(dvt))
@@ -298,7 +319,7 @@ async def _open_location_channel(stack: AsyncExitStack, *, serial: str | None) -
     target = udid or serial
 
     if major >= 17:
-        loc = await _open_rsd_dvt_channel(stack, serial=target)
+        loc = await _open_rsd_dvt_channel(stack, serial=target, ios_major=major)
         return loc, desc
 
     provider = await _lockdown(target)
@@ -396,11 +417,13 @@ async def dvt_hold_location(
     label: str = "",
     serial: str | None = None,
     hold_seconds: float = 0.0,
+    jitter_m: float = 0.0,
     on_event=None,
 ) -> dict[str, object]:
     """Apply a simulated location and keep it alive until stopped.
 
     ``hold_seconds`` <= 0 means "until Ctrl+C, SIGTERM or `awh restore`".
+    Optional ``jitter_m`` adds realistic GPS drift (in meters) on each refresh.
     Always restores the real GPS on the way out.
     """
     emit = on_event or (lambda **_k: None)
@@ -414,11 +437,13 @@ async def dvt_hold_location(
     state: dict[str, object] = {
         "active": False,
         "engine": "dvt",
+        "mode": "static",
         "pid": pid,
         "serial": serial,
         "label": label,
         "latitude": latitude,
         "longitude": longitude,
+        "jitter_m": jitter_m,
         "started_at": int(time.time()),
     }
     applied_once = False
@@ -438,8 +463,15 @@ async def dvt_hold_location(
             try:
                 async with AsyncExitStack() as stack:
                     loc, desc = await _open_location_channel(stack, serial=serial)
-                    await loc.set(latitude, longitude)
-                    state.update(active=True, device=desc, updated_at=int(time.time()))
+                    cur_lat, cur_lon = apply_gps_jitter(latitude, longitude, jitter_m)
+                    await loc.set(cur_lat, cur_lon)
+                    state.update(
+                        active=True,
+                        device=desc,
+                        latitude=cur_lat,
+                        longitude=cur_lon,
+                        updated_at=int(time.time()),
+                    )
                     _save_dvt_state(state)
                     if not applied_once:
                         emit(
@@ -447,8 +479,9 @@ async def dvt_hold_location(
                             engine="dvt",
                             device=desc,
                             label=label,
-                            latitude=latitude,
-                            longitude=longitude,
+                            latitude=cur_lat,
+                            longitude=cur_lon,
+                            jitter_m=jitter_m,
                         )
                     else:
                         emit(event="reconnected", engine="dvt", attempt=reconnects)
@@ -459,7 +492,14 @@ async def dvt_hold_location(
                             with suppress(TimeoutError):
                                 await asyncio.wait_for(stop.wait(), 0.25)
                             if loop.time() >= next_refresh and not should_stop():
-                                await loc.set(latitude, longitude)
+                                cur_lat, cur_lon = apply_gps_jitter(latitude, longitude, jitter_m)
+                                await loc.set(cur_lat, cur_lon)
+                                state.update(
+                                    latitude=cur_lat,
+                                    longitude=cur_lon,
+                                    updated_at=int(time.time()),
+                                )
+                                _save_dvt_state(state)
                                 next_refresh = loop.time() + REFRESH_SECONDS
                     finally:
                         # Restore real GPS on this same live session before AsyncExitStack tears
@@ -511,6 +551,163 @@ async def dvt_hold_location(
         _clear_dvt_state(only_pid=pid)
 
     state.update(active=False, reconnects=reconnects, acknowledged=acked)
+    return state
+
+
+async def dvt_play_gpx(
+    points: list[RoutePoint],
+    *,
+    label: str = "",
+    serial: str | None = None,
+    speed: float = 1.0,
+    loop_route: bool = False,
+    jitter_m: float = 0.0,
+    default_step_seconds: float = 1.0,
+    on_event=None,
+) -> dict[str, object]:
+    """Replay a GPX route over DVT/DtSimulateLocation with reconnect & clean GPS restore."""
+    if not points:
+        raise ValueError("GPX 轨迹点列表不能为空")
+    emit = on_event or (lambda **_k: None)
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    restore_sig = _install_stop_signals(loop, stop)
+    pid = os.getpid()
+    _clear_stop_file(only_pid=pid)
+
+    state: dict[str, object] = {
+        "active": False,
+        "engine": "dvt",
+        "mode": "gpx",
+        "pid": pid,
+        "serial": serial,
+        "label": label,
+        "latitude": points[0].latitude,
+        "longitude": points[0].longitude,
+        "point_index": 0,
+        "total_points": len(points),
+        "speed": speed,
+        "loop": loop_route,
+        "started_at": int(time.time()),
+    }
+    applied_once = False
+    reconnects = 0
+    acked = False
+    idx = 0
+    sent_points = 0
+
+    def should_stop() -> bool:
+        if stop.is_set():
+            return True
+        if _stop_file_targets_pid(pid):
+            stop.set()
+            return True
+        return False
+
+    try:
+        while not should_stop():
+            try:
+                async with AsyncExitStack() as stack:
+                    loc, desc = await _open_location_channel(stack, serial=serial)
+                    try:
+                        while not should_stop():
+                            pt = points[idx]
+                            cur_lat, cur_lon = apply_gps_jitter(pt.latitude, pt.longitude, jitter_m)
+                            await loc.set(cur_lat, cur_lon)
+                            sent_points += 1
+                            state.update(
+                                active=True,
+                                device=desc,
+                                latitude=cur_lat,
+                                longitude=cur_lon,
+                                point_index=idx + 1,
+                                updated_at=int(time.time()),
+                            )
+                            _save_dvt_state(state)
+                            if not applied_once:
+                                emit(
+                                    event="location_applied",
+                                    engine="dvt",
+                                    mode="gpx",
+                                    device=desc,
+                                    label=label,
+                                    latitude=cur_lat,
+                                    longitude=cur_lon,
+                                    total_points=len(points),
+                                )
+                                applied_once = True
+                            elif idx == 0 and sent_points > 1:
+                                emit(event="route_loop", engine="dvt", total_points=len(points))
+
+                            idx += 1
+                            if idx >= len(points):
+                                if loop_route:
+                                    idx = 0
+                                else:
+                                    stop.set()
+                                    break
+
+                            raw_wait = (
+                                points[idx].delay_seconds
+                                if points[idx].delay_seconds is not None
+                                else default_step_seconds
+                            )
+                            wait_s = max(0.05, raw_wait / max(0.05, speed))
+                            wait_until = loop.time() + wait_s
+                            while not should_stop() and (rem := wait_until - loop.time()) > 0:
+                                with suppress(TimeoutError):
+                                    await asyncio.wait_for(stop.wait(), min(0.25, rem))
+                    finally:
+                        exc_type = sys.exc_info()[0]
+                        interrupted = exc_type is not None and issubclass(
+                            exc_type, (asyncio.CancelledError, KeyboardInterrupt)
+                        )
+                        if interrupted:
+                            stop.set()
+                        if should_stop():
+                            cleared_ok, acked = await _clear_uninterruptible(loc)
+                            if cleared_ok:
+                                state["cleared"] = True
+                                _record_last_clear(pid, acknowledged=acked)
+                break
+            except DvtSetupError:
+                raise
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                stop.set()
+                raise
+            except Exception as exc:
+                if not applied_once:
+                    raise DvtSetupError(
+                        f"{type(exc).__name__}: {exc}\n  提示: {_hint_for(exc)}"
+                    ) from exc
+                if reconnects >= 1000:
+                    raise
+                delay = RECONNECT_DELAYS[min(reconnects, len(RECONNECT_DELAYS) - 1)]
+                reconnects += 1
+                state.update(active=False)
+                _save_dvt_state(state)
+                emit(
+                    event="reconnecting",
+                    engine="dvt",
+                    attempt=reconnects,
+                    reason=type(exc).__name__,
+                    retry_in=delay,
+                )
+                wait_until = loop.time() + delay
+                while not should_stop() and (rem := wait_until - loop.time()) > 0:
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(stop.wait(), min(0.25, rem))
+    finally:
+        _remove_stop_signals(loop, restore_sig)
+        _clear_stop_file(only_pid=pid)
+        _clear_dvt_state(only_pid=pid)
+
+    state.update(
+        active=False,
+        reconnects=reconnects,
+        points_sent=sent_points,
+        acknowledged=acked,
+    )
     return state
 
 
