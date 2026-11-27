@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4.1 — 2026-11-27
+
+### 文档、视觉与打包体验升级
+- **解决外部徽章加载不稳与配图缺失**：移除易超时/裂图的 `img.shields.io` 外部徽章，在仓库 `assets/` 内新增 4 张本地托管高清工程风 SVG 图（`hero-banner.svg`、`architecture.svg`、`locate-guide.svg`、`watch-guide.svg`），浅色/深色主题均高对比清晰显示。
+- **全面重写面向纯小白的保姆级 `README.md`**：补齐零基础硬件识别、Windows 微软商店「Apple 设备」驱动安装、无需 Git 的 ZIP 下载与 CMD/访达开终端步骤、CMD/PowerShell/macOS 三种清华镜像写法、开发者模式开启详解、高德/百度坐标零偏移拾取教程、可直接复制的 GPX 模板、Apple Watch 手机端 5 步必做清单及 10 大高频 FAQ。
+- **完善 Skill ZIP 打包审计**：CI 打包 `apple-watch-health-skill.zip` 时一并收录 `assets/*.svg` 并自动做 XML 语法合法性校验。
+
+---
+
 ## 2.4.0 — 2026-11-27
 
 ### 新增功能（对标爱思助手完整定位体验）

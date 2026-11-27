@@ -10,7 +10,7 @@ description: >
   不适用于血压数值测量、医疗诊断或商业批量代开。
 license: GPL-3.0-only
 metadata:
-  version: "2.4.0"
+  version: "2.4.1"
   platforms: "macOS, Windows"
 ---
 

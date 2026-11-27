@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="400" viewBox="0 0 960 400" role="img" aria-label="Apple Watch Health 双引擎工作原理架构图">
+  <defs>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#2563EB"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#059669"/>
+    </marker>
+    <marker id="arrSlate" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#475569"/>
+    </marker>
+    <style>
+      .t { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <!-- Outer card -->
+  <rect x="2" y="2" width="956" height="396" rx="16" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
+
+  <!-- Header -->
+  <text x="28" y="38" class="t" font-size="18" font-weight="700" fill="#0F172A">双引擎工作原理总览（为什么一套工具同时搞定全局改定位与健康功能）</text>
+  <line x1="28" y1="52" x2="932" y2="52" stroke="#E2E8F0" stroke-width="1"/>
+
+  <!-- Column headers -->
+  <rect x="28" y="68" width="256" height="32" rx="8" fill="#0F172A"/>
+  <text x="156" y="89" class="t" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">电脑端：Mac / Windows (awh)</text>
+
+  <rect x="348" y="68" width="268" height="32" rx="8" fill="#1E293B"/>
+  <text x="482" y="89" class="t" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">USB 数据线 → iPhone（已信任）</text>
+
+  <rect x="680" y="68" width="252" height="32" rx="8" fill="#334155"/>
+  <text x="806" y="89" class="t" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">最终效果与目标端</text>
+
+  <!-- Row 1: Doctor & Device Inspection -->
+  <rect x="28" y="114" width="256" height="58" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+  <text x="42" y="137" class="mono" font-size="13" font-weight="700" fill="#0F172A">awh doctor / devmode</text>
+  <text x="42" y="158" class="t" font-size="12" fill="#475569">自动检测驱动、型号、系统与开发者模式</text>
+
+  <line x1="284" y1="143" x2="342" y2="143" stroke="#475569" stroke-width="2" marker-end="url(#arrSlate)"/>
+
+  <rect x="348" y="114" width="268" height="58" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+  <text x="362" y="137" class="mono" font-size="13" font-weight="700" fill="#0F172A">lockdownd + companion_proxy</text>
+  <text x="362" y="158" class="t" font-size="12" fill="#475569">读取本机及配对 Apple Watch 完整信息</text>
+
+  <line x1="616" y1="143" x2="674" y2="143" stroke="#475569" stroke-width="2" marker-end="url(#arrSlate)"/>
+
+  <rect x="680" y="114" width="252" height="58" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1"/>
+  <text x="694" y="137" class="t" font-size="13" font-weight="700" fill="#0F172A">精准兼容性体检</text>
+  <text x="694" y="158" class="t" font-size="12" fill="#475569">自动识别 Watch 型号与 watchOS 版本</text>
+
+  <!-- Row 2: Global Locate Engine (Blue) -->
+  <rect x="28" y="186" width="256" height="72" rx="10" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.2"/>
+  <text x="42" y="209" class="mono" font-size="13" font-weight="700" fill="#1D4ED8">awh locate (默认 DVT 引擎)</text>
+  <text x="42" y="230" class="t" font-size="12" fill="#1E3A8A">地名 / 经纬度 / 高德百度纠偏</text>
+  <text x="42" y="248" class="t" font-size="12" fill="#334155">支持 --detach 保持 · --jitter · --gpx</text>
+
+  <line x1="284" y1="222" x2="342" y2="222" stroke="#2563EB" stroke-width="2.2" marker-end="url(#arrBlue)"/>
+
+  <rect x="348" y="186" width="268" height="72" rx="10" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.2"/>
+  <text x="362" y="209" class="mono" font-size="12.5" font-weight="700" fill="#1D4ED8">UserspaceRsdTunnel / DtSimulate</text>
+  <text x="362" y="230" class="t" font-size="12" fill="#1E3A8A">iOS 17+ 免 Root 隧道 + 自动挂载 DDI</text>
+  <text x="362" y="248" class="t" font-size="12" fill="#334155">iOS &lt;=16 自动切原生 DtSimulateLocation</text>
+
+  <line x1="616" y1="222" x2="674" y2="222" stroke="#2563EB" stroke-width="2.2" marker-end="url(#arrBlue)"/>
+
+  <rect x="680" y="186" width="252" height="72" rx="10" fill="#EFF6FF" stroke="#93C5FD" stroke-width="1.2"/>
+  <text x="694" y="209" class="t" font-size="13.5" font-weight="700" fill="#1E3A8A">微信 / 高德 / 苹果地图全生效</text>
+  <text x="694" y="230" class="t" font-size="12" fill="#334155">开着 Wi-Fi 与 5G 流量照样秒改</text>
+  <text x="694" y="248" class="t" font-size="12" fill="#1D4ED8">需开启开发者模式 · 零系统副作用</text>
+
+  <!-- Row 3: Apple Watch Health iAP2 Engine (Green) -->
+  <rect x="28" y="272" width="256" height="72" rx="10" fill="#ECFDF5" stroke="#6EE7B7" stroke-width="1.2"/>
+  <text x="42" y="295" class="mono" font-size="13" font-weight="700" fill="#047857">awh send (iAP2 硬件引擎)</text>
+  <text x="42" y="316" class="t" font-size="12" fill="#065F46">模拟外置 MFi GPS 硬件配件 (NMEA)</text>
+  <text x="42" y="334" class="t" font-size="12" fill="#334155">免开发者模式 · macOS 自动断网沙箱</text>
+
+  <line x1="284" y1="308" x2="342" y2="308" stroke="#059669" stroke-width="2.2" marker-end="url(#arrGreen)"/>
+
+  <rect x="348" y="272" width="268" height="72" rx="10" fill="#ECFDF5" stroke="#6EE7B7" stroke-width="1.2"/>
+  <text x="362" y="295" class="mono" font-size="12.5" font-weight="700" fill="#047857">com.apple.carkit.service (MFi-v3)</text>
+  <text x="362" y="316" class="t" font-size="12" fill="#065F46">标记 isProducedByAccessory = true</text>
+  <text x="362" y="334" class="t" font-size="12" fill="#334155">配合飞行模式绕过大陆基站/Wi-Fi 校验</text>
+
+  <line x1="616" y1="308" x2="674" y2="308" stroke="#059669" stroke-width="2.2" marker-end="url(#arrGreen)"/>
+
+  <rect x="680" y="272" width="252" height="72" rx="10" fill="#ECFDF5" stroke="#6EE7B7" stroke-width="1.2"/>
+  <text x="694" y="295" class="t" font-size="13.5" font-weight="700" fill="#065F46">Apple Watch 健康 App 通过校验</text>
+  <text x="694" y="316" class="t" font-size="12" fill="#334155">成功开启国行高血压通知等受限功能</text>
+  <text x="694" y="334" class="t" font-size="12" fill="#047857">恢复真实定位后「通知已打开」保留</text>
+
+  <!-- Footer bar: Restore -->
+  <rect x="28" y="356" width="904" height="30" rx="8" fill="#FFFBEB" stroke="#FDE68A" stroke-width="1"/>
+  <text x="480" y="376" class="t" font-size="12.5" font-weight="600" fill="#92400E" text-anchor="middle">随时执行 awh restore：立即停止后台保持进程并发送官方 stopLocationSimulation，秒回真实 GPS · 不改 Apple ID / 系统时间 / 描述文件</text>
+</svg>
